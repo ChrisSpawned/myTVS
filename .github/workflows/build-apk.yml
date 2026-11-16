@@ -18,9 +18,10 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # ubuntu-latest ships the Android SDK preinstalled with licenses accepted;
+      # AGP downloads any missing platform/build-tools itself. (We avoid
+      # android-actions/setup-android@v3, which fails trying to fetch the
+      # obsolete "tools" package.)
       - name: Make gradlew executable
         run: chmod +x gradlew
 

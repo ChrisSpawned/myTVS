@@ -84,8 +84,13 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
                 }
             }
         }
+        val probeBtn = Button(this).apply {
+            text = "Probe map Wi-Fi"
+            setOnClickListener { onProbeClicked() }
+        }
         row.addView(connectBtn)
         row.addView(exportBtn)
+        row.addView(probeBtn)
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -209,6 +214,21 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     }
 
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
+
+    private fun onProbeClicked() {
+        val a = adapter
+        if (a == null || !a.isEnabled) { toast("Turn on Bluetooth/Wi-Fi"); return }
+        status("Map-channel probe: make sure you're on the cluster's Wi-Fi…")
+        FrameLog.add("WIFI", "---- map channel probe start ----")
+        MapProbe.run(applicationContext, object : MapProbe.Listener {
+            override fun onProbe(text: String) {
+                main.post { status(text); refreshLog() }
+            }
+            override fun onDone() {
+                main.post { status("Map-channel probe done. Export log to share."); refreshLog() }
+            }
+        })
+    }
 
     override fun onDestroy() {
         gatt?.disconnect()

@@ -11,19 +11,15 @@ import java.net.Socket
 import kotlin.concurrent.thread
 
 /**
- * Read-only probe of the cluster's Wi-Fi map channel.
+ * Read-only probe of the cluster's Wi-Fi map channel (192.168.1.1, ports 2000/4444).
  *
- * From the TVS Connect app we know the cluster hosts a TCP server at
- * 192.168.1.1 (ports 2000 and 4444) on its own Wi-Fi AP, over which it does
- * request/response still-image transfer. This probe, while the phone is joined
- * to that AP, opens a TCP connection to those ports and logs whatever the
- * cluster sends. It writes NOTHING to the cluster — it only listens, to confirm
- * the server exists on the Ntorq 150 TFT and to capture its opening bytes
- * (the "query" the app responds to).
+ * Binds to the Wi-Fi network the phone is actually on and logs whatever the
+ * cluster sends. Writes NOTHING to the cluster.
  *
- * The socket is bound to the Wi-Fi network explicitly, because the cluster AP
- * has no internet and Android would otherwise route the connection over mobile
- * data and never reach 192.168.1.1.
+ * The cluster AP has no internet, which Android dislikes: it marks the network
+ * "unvalidated" and may route around it. So instead of asking the system to
+ * find a matching network, this enumerates the phone's live networks, picks the
+ * Wi-Fi one, and binds the socket to it directly.
  */
 object MapProbe {
     const val HOST = "192.168.1.1"
@@ -37,82 +33,75 @@ object MapProbe {
     @Volatile private var running = false
 
     fun run(context: Context, listener: Listener) {
-        if (running) {
-            listener.onProbe("Probe already running")
-            return
-        }
+        if (running) { listener.onProbe("Probe already running"); return }
         running = true
         val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        // Match the cluster AP: Wi-Fi transport, and do NOT require internet.
-        val req = NetworkRequest.Builder()
-            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
 
-        val cb = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                log(listener, "Bound to Wi-Fi network — probing $HOST")
-                thread(name = "map-probe", isDaemon = true) {
-                    for (port in PORTS) probePort(network, port, listener)
-                    log(listener, "Probe finished.")
-                    listener.onDone()
-                    running = false
-                    runCatching { cm.unregisterNetworkCallback(this) }
+        thread(name = "map-probe", isDaemon = true) {
+            try {
+                val wifi = wifiNetworks(cm)
+                if (wifi.isEmpty()) {
+                    log(listener, "Phone is not on any Wi-Fi right now.")
+                    log(listener, "Join the cluster's Wi-Fi, tap \"Stay connected\" on the " +
+                        "no-internet prompt, then run this again.")
+                    // last-ditch: try an unbound socket in case routing still works
+                    for (port in PORTS) probe(null, port, listener)
+                    return@thread
                 }
-            }
-
-            override fun onUnavailable() {
-                log(listener, "No Wi-Fi network available. Are you connected to the cluster's Wi-Fi?")
-                listener.onDone()
+                log(listener, "Live Wi-Fi networks: ${wifi.size}")
+                for (net in wifi) {
+                    val gw = gatewayHint(cm, net)
+                    log(listener, "Trying Wi-Fi network${if (gw != null) " (gw $gw)" else ""}")
+                    for (port in PORTS) probe(net, port, listener)
+                }
+            } finally {
+                log(listener, "Probe finished.")
                 running = false
+                listener.onDone()
             }
-        }
-        try {
-            // requestNetwork with a timeout so we don't wait forever.
-            cm.requestNetwork(req, cb, 8000)
-        } catch (e: Exception) {
-            log(listener, "Could not request Wi-Fi network: ${e.message}")
-            listener.onDone()
-            running = false
         }
     }
 
-    private fun probePort(network: Network, port: Int, listener: Listener) {
-        log(listener, "— port $port —")
+    private fun wifiNetworks(cm: ConnectivityManager): List<Network> =
+        cm.allNetworks.filter {
+            val c = cm.getNetworkCapabilities(it)
+            c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        }
+
+    private fun gatewayHint(cm: ConnectivityManager, net: Network): String? = runCatching {
+        cm.getLinkProperties(net)?.linkAddresses?.firstOrNull {
+            it.address.hostAddress?.startsWith("192.168") == true
+        }?.address?.hostAddress
+    }.getOrNull()
+
+    private fun probe(net: Network?, port: Int, listener: Listener) {
+        log(listener, "— $HOST:$port —")
         val socket = Socket()
         try {
-            network.bindSocket(socket)
+            net?.bindSocket(socket)
             socket.connect(InetSocketAddress(HOST, port), 4000)
             log(listener, "Connected to $HOST:$port ✓")
             socket.soTimeout = 5000
             val input: InputStream = socket.getInputStream()
             val buf = ByteArray(2048)
-            var totalRead = 0
-            val deadline = System.currentTimeMillis() + 6000
+            var total = 0
+            val deadline = System.currentTimeMillis() + 7000
             while (System.currentTimeMillis() < deadline) {
-                val n = try {
-                    input.read(buf)
-                } catch (e: java.net.SocketTimeoutException) {
-                    -2
-                }
-                if (n == -1) {
-                    log(listener, "Cluster closed the connection")
-                    break
-                }
-                if (n == -2) {
-                    if (totalRead == 0) log(listener, "Connected, but cluster sent nothing in 6 s")
-                    break
-                }
-                if (n > 0) {
-                    totalRead += n
-                    val hex = buf.copyOf(n).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
-                    log(listener, "RX $n bytes: $hex")
+                val n = try { input.read(buf) } catch (e: java.net.SocketTimeoutException) { -2 }
+                when {
+                    n == -1 -> { log(listener, "cluster closed the connection"); break }
+                    n == -2 -> { if (total == 0) log(listener, "connected, but no bytes in 7 s"); break }
+                    n > 0 -> {
+                        total += n
+                        val hex = buf.copyOf(n).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+                        log(listener, "RX $n: $hex")
+                    }
                 }
             }
         } catch (e: java.net.ConnectException) {
-            log(listener, "$HOST:$port refused (no server on this port)")
+            log(listener, "$HOST:$port refused / unreachable (${e.message})")
         } catch (e: Exception) {
-            log(listener, "$HOST:$port error: ${e.message}")
+            log(listener, "$HOST:$port ${e.javaClass.simpleName}: ${e.message}")
         } finally {
             runCatching { socket.close() }
         }

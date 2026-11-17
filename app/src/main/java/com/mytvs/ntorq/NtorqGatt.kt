@@ -280,9 +280,37 @@ class NtorqGatt(
         return head + t + pad + byteArrayOf(0xFF.toByte())
     }
 
+    private fun sanitize(s: String): String =
+        s.map { c -> if (c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == ' ') c else 'X' }.joinToString("")
+
+    /**
+     * Navigation-assist-ON frame (createNavigationAssistArray, dataId 0x4C):
+     *   5B 4C 4E 41 | text(≤15 alnum) | pad | FF
+     * This is the command that switches the cluster to its navigation screen.
+     */
+    private fun navAssistFrame(text: String): ByteArray {
+        val t = sanitize(text).take(15).toByteArray(Charsets.UTF_8)
+        val head = byteArrayOf(0x5B, 0x4C, 0x4E, 0x41)
+        val pad = ByteArray(20 - (head.size + t.size + 1))
+        return head + t + pad + byteArrayOf(0xFF.toByte())
+    }
+
+    /** Custom text frame (createMobileToClusterArray): 5B <dataId> | text(≤17) | pad | FF */
+    private fun customTextFrame(text: String, dataId: Int): ByteArray {
+        val t = sanitize(text).take(17).toByteArray(Charsets.UTF_8)
+        val head = byteArrayOf(0x5B, dataId.toByte())
+        val pad = ByteArray(20 - (head.size + t.size + 1))
+        return head + t + pad + byteArrayOf(0xFF.toByte())
+    }
+
+    /** The app's periodic nav keepalive: sendNavAssistOn("NAVIGATION","ASSIST ON"). */
+    private fun sendAssistOn() {
+        writeRaw("assist-on 5B4C", navAssistFrame("NAVIGATION"))
+        main.postDelayed({ writeRaw("assist-text 5B63", customTextFrame("ASSIST ON", 0x63)) }, 350)
+    }
+
     private fun sendNavStep(line1: String, line2: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
-        writeRaw("nav-loc", navLocationFrame("Navigation"))
-        main.postDelayed({ writeRaw("nav-L1 \"$line1\"", navTextFrame(line1)) }, 150)
+        writeRaw("nav-L1 \"$line1\"", navTextFrame(line1))
         main.postDelayed({
             if (mtu - 3 >= 33) writeRaw("nav-L2 \"$line2\"", navControl2Frame(line2, false))
             else FrameLog.add("BLE", "nav-L2 skipped: MTU $mtu too small for the 33-byte line-2 frame")
@@ -297,20 +325,24 @@ class NtorqGatt(
      * to a navigation screen. Line 1 = the turn, line 2 = the cluster's own live
      * average mileage (decoded from telemetry). Ends with a nav-stopped frame.
      */
-    fun sendNavTest(picto: Int = 4) {
-        status("Nav test: sending turn-by-turn + mileage line…")
+    fun sendNavTest(picto: Int = 0) {
+        status("Nav test: assist-on + turn-by-turn…")
+        // 1) Switch the cluster into nav mode with the assist-on keepalive.
+        sendAssistOn()
+        // 2) Stream turn data (left turn, picto 0), re-sending assist-on as keepalive.
         val steps = listOf(250, 200, 150, 100, 60, 30, 10)
         steps.forEachIndexed { i, d ->
             main.postDelayed({
+                if (i % 2 == 0) sendAssistOn()
                 val m = latestAvgMileageRaw
                 val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
-                sendNavStep("Turn left", line2, d, 2500 - i * 300, 480L, picto)
-            }, i * 1800L)
+                main.postDelayed({ sendNavStep("Turn left", line2, d, 15600, 1800L, picto) }, 700)
+            }, 1400 + i * 2200L)
         }
         main.postDelayed({
             writeRaw("nav-stop", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Nav test done — what did the cluster show (screen + line 2)? Export the log.")
-        }, steps.size * 1800L + 600L)
+            status("Nav test done — did the cluster show a navigation screen? Export the log.")
+        }, 1400 + steps.size * 2200L + 800L)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

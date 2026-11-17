@@ -91,6 +91,11 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         row.addView(connectBtn)
         row.addView(exportBtn)
         row.addView(probeBtn)
+        val handshakeBtn = Button(this).apply {
+            text = "Map handshake"
+            setOnClickListener { onHandshakeClicked() }
+        }
+        row.addView(handshakeBtn)
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -227,6 +232,15 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             override fun onDone() {
                 main.post { status("Map-channel probe done. Export log to share."); refreshLog() }
             }
+        })
+    }
+
+    private fun onHandshakeClicked() {
+        status("Map handshake: make sure you're on the cluster's Wi-Fi…")
+        FrameLog.add("WIFI", "---- map handshake start ----")
+        MapProbe.handshake(applicationContext, object : MapProbe.Listener {
+            override fun onProbe(text: String) { main.post { status(text); refreshLog() } }
+            override fun onDone() { main.post { status("Handshake done. Export log."); refreshLog() } }
         })
     }
 

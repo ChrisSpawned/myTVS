@@ -107,6 +107,100 @@ object MapProbe {
         }
     }
 
+    // ---- Handshake mode: prompt the cluster to issue an image request ----
+
+    /**
+     * Connects to the cluster's TCP server and sends the app's own small control
+     * packets (heartbeat + "image available"), framed 5A5A..5B5B, to make the
+     * cluster reveal its image request (0xAA/0xBB/0xCC). Logs everything received.
+     * Sends only tiny control packets on the display/image channel; never touches
+     * the BLE instrument-control path.
+     */
+    fun handshake(context: Context, listener: Listener) {
+        if (running) { listener.onProbe("Busy"); return }
+        running = true
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        thread(name = "map-handshake", isDaemon = true) {
+            try {
+                val net = wifiNetworks(cm).firstOrNull()
+                if (net == null) {
+                    log(listener, "Not on the cluster Wi-Fi. Join it (stay connected) and retry.")
+                    return@thread
+                }
+                val socket = Socket()
+                try {
+                    net.bindSocket(socket)
+                    socket.connect(InetSocketAddress(HOST, 2000), 4000)
+                    log(listener, "Connected to $HOST:2000 ✓ — starting handshake")
+                    socket.soTimeout = 1000
+                    val out = socket.getOutputStream()
+                    val input = socket.getInputStream()
+                    val reader = thread(name = "map-hs-rx", isDaemon = true) {
+                        val buf = ByteArray(4096)
+                        val end = System.currentTimeMillis() + 20000
+                        while (System.currentTimeMillis() < end) {
+                            val n = try { input.read(buf) } catch (e: java.net.SocketTimeoutException) { 0 } catch (e: Exception) { -1 }
+                            if (n == -1) { log(listener, "cluster closed the connection"); break }
+                            if (n > 0) {
+                                val hex = buf.copyOf(n).joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }
+                                log(listener, "RX $n: $hex")
+                            }
+                        }
+                    }
+                    // Scripted sends. Availability = "I have an image for you".
+                    val avail = byteArrayOf(0x05, 0x01, 0x00, 0x01, 0x00)
+                    val nav = byteArrayOf(0x05, 0x07, 0x00, 0x01, 0x00)
+                    var counter = 1
+                    repeat(10) { i ->
+                        // framed heartbeat: 5A 5A | ctrHi ctrLo | 5B 5B
+                        send(out, listener, "heartbeat", framed(byteArrayOf((counter shr 8).toByte(), counter.toByte())))
+                        counter++
+                        Thread.sleep(400)
+                        if (i == 1) send(out, listener, "avail(framed)", framed(avail))
+                        if (i == 2) send(out, listener, "avail(raw)", avail)
+                        if (i == 3) send(out, listener, "nav(framed)", framed(nav))
+                        if (i == 4) send(out, listener, "avail(no-len)", concat(PREFIX, avail, POSTFIX))
+                        Thread.sleep(600)
+                    }
+                    reader.join(21000)
+                } finally {
+                    runCatching { socket.close() }
+                }
+            } catch (e: Exception) {
+                log(listener, "handshake error: ${e.javaClass.simpleName}: ${e.message}")
+            } finally {
+                log(listener, "Handshake finished.")
+                running = false
+                listener.onDone()
+            }
+        }
+    }
+
+    private val PREFIX = byteArrayOf(0x5A, 0x5A)
+    private val POSTFIX = byteArrayOf(0x5B, 0x5B)
+
+    /** 5A 5A | len(2, big-endian) | payload | 5B 5B */
+    private fun framed(payload: ByteArray): ByteArray {
+        val len = byteArrayOf((payload.size shr 8).toByte(), payload.size.toByte())
+        return concat(PREFIX, len, payload, POSTFIX)
+    }
+
+    private fun concat(vararg parts: ByteArray): ByteArray {
+        val out = ByteArray(parts.sumOf { it.size })
+        var o = 0
+        for (p in parts) { p.copyInto(out, o); o += p.size }
+        return out
+    }
+
+    private fun send(out: java.io.OutputStream, listener: Listener, label: String, bytes: ByteArray) {
+        try {
+            out.write(bytes); out.flush()
+            log(listener, "TX $label: ${bytes.joinToString(" ") { "%02X".format(it.toInt() and 0xFF) }}")
+        } catch (e: Exception) {
+            log(listener, "TX $label failed: ${e.message}")
+        }
+    }
+
     private fun log(listener: Listener, text: String) {
         FrameLog.add("WIFI", text)
         listener.onProbe(text)

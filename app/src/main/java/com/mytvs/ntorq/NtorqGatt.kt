@@ -198,6 +198,74 @@ class NtorqGatt(
         status("Sent image-channel INIT frames — watch the log for a cluster reply.")
     }
 
+    // ---- Navigation (turn-by-turn) --------------------------------------
+    // Reconstructed from BleNavigationSendData.byteArrayForIceBikeNavigation +
+    // BleEngine.sendNavigationData. Two raw 20-byte frames, text first then the
+    // control frame 400 ms later (exactly as the official app sends them).
+    //
+    //  Text frame:    5B 4F | text(≤17 UTF-8) | pad 0x00 | FF
+    //  Control frame: 5A 4E | distNext(2) | timeMin(2) | totalDist(3) |
+    //                 picto(1) | lineCount(1) | navOnOff(1) | 00×7 | FF
+    //  navOnOff on the Ntorq: 0x00 = navigating, 0xFF = stopped.
+
+    private fun navTextFrame(text: String): ByteArray {
+        val t = text.take(17).toByteArray(Charsets.UTF_8)
+        val head = byteArrayOf(0x5B, 0x4F)
+        val pad = ByteArray(20 - (head.size + t.size + 1))
+        return head + t + pad + byteArrayOf(0xFF.toByte())
+    }
+
+    private fun be2(v: Int): ByteArray = when {
+        v >= 0xFFFF -> byteArrayOf(0xFF.toByte(), 0xFF.toByte())
+        v <= 0xFF -> byteArrayOf(0, v.toByte())
+        else -> byteArrayOf(((v shr 8) and 0xFF).toByte(), (v and 0xFF).toByte())
+    }
+
+    private fun be3(v: Int): ByteArray = when {
+        v <= 0xFF -> byteArrayOf(0, 0, v.toByte())
+        v <= 0xFFFF -> byteArrayOf(0, ((v shr 8) and 0xFF).toByte(), (v and 0xFF).toByte())
+        else -> byteArrayOf(((v shr 16) and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(), (v and 0xFF).toByte())
+    }
+
+    private fun navControlFrame(
+        distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int, twoLines: Boolean, stopped: Boolean,
+    ): ByteArray {
+        val timeMin = (timeSec / 60).toInt()
+        return byteArrayOf(0x5A, 0x4E) +
+            be2(distNextM) +
+            be2(timeMin) +
+            be3(totalDistM) +
+            byteArrayOf(picto.toByte()) +
+            byteArrayOf(if (twoLines) 2 else 1) +
+            byteArrayOf(if (stopped) 0xFF.toByte() else 0x00) +
+            byteArrayOf(0, 0, 0, 0, 0, 0, 0) +
+            byteArrayOf(0xFF.toByte())
+    }
+
+    private fun sendNavPair(text: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
+        writeRaw("nav-text \"$text\"", navTextFrame(text))
+        main.postDelayed({
+            writeRaw("nav-ctrl d=$distNextM picto=$picto", navControlFrame(distNextM, totalDistM, timeSec, picto, text.length > 17, false))
+        }, 400)
+    }
+
+    /**
+     * Fake a short live turn-by-turn so we can see whether the cluster switches
+     * to a navigation screen. Counts a "turn left" down from 250 m, then sends a
+     * nav-stopped frame to clear it.
+     */
+    fun sendNavTest(picto: Int = 4) {
+        status("Nav test: sending turn-by-turn frames…")
+        val steps = listOf(250, 200, 150, 100, 60, 30, 10)
+        steps.forEachIndexed { i, d ->
+            main.postDelayed({ sendNavPair("Turn left $d m", d, 2500 - i * 300, 480L, picto) }, i * 1800L)
+        }
+        main.postDelayed({
+            writeRaw("nav-stop", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
+            status("Nav test done — did the cluster show a navigation screen? Export the log.")
+        }, steps.size * 1800L + 600L)
+    }
+
     private fun handleData(uuid: UUID, value: ByteArray?) {
         if (uuid != NOTIFY || value == null) return
         val hex = NtorqCodec.hex(value)

@@ -93,8 +93,12 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             setOnClickListener { onHandshakeClicked() }
         }
         val imageBtn = Button(this).apply {
-            text = "Image probe (BLE)"
+            text = "Image probe"
             setOnClickListener { onImageProbeClicked() }
+        }
+        val navBtn = Button(this).apply {
+            text = "Nav test"
+            setOnClickListener { onNavTestClicked() }
         }
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -104,6 +108,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         row2.addView(probeBtn, weighted())
         row2.addView(handshakeBtn, weighted())
         row3.addView(imageBtn, weighted())
+        row3.addView(navBtn, weighted())
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -254,6 +259,18 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         status("Image-channel probe: sending INIT frames over BLE…")
         FrameLog.add("BLE", "---- image-channel INIT probe start ----")
         g.sendImageInitProbe()
+        refreshLog()
+    }
+
+    private fun onNavTestClicked() {
+        val g = gatt
+        if (g == null) {
+            toast("Connect to the cluster first")
+            return
+        }
+        status("Nav test: sending turn-by-turn frames over BLE…")
+        FrameLog.add("BLE", "---- nav test start ----")
+        g.sendNavTest()
         refreshLog()
     }
 

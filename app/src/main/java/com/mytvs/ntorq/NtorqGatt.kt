@@ -342,24 +342,32 @@ class NtorqGatt(
      * to a navigation screen. Line 1 = the turn, line 2 = the cluster's own live
      * average mileage (decoded from telemetry). Ends with a nav-stopped frame.
      */
+    /**
+     * Encoding sweep: send the same nav burst under each candidate write-encoding
+     * (raw, XOR 0xEA, XOR 0xEB) in sequence, so we can see which — if any — the
+     * cluster reacts to. Each phase lasts ~7 s. Watch the cluster and note the phase.
+     */
     fun sendNavTest(picto: Int = 0) {
-        status("Nav test: assist-on + turn-by-turn…")
-        // 1) Switch the cluster into nav mode with the assist-on keepalive.
-        sendAssistOn()
-        // 2) Stream turn data (left turn, picto 0), re-sending assist-on as keepalive.
-        val steps = listOf(250, 200, 150, 100, 60, 30, 10)
-        steps.forEachIndexed { i, d ->
+        val phases = listOf(-1 to "RAW (no encryption)", 0xEA to "XOR 0xEA", 0xEB to "XOR 0xEB")
+        phases.forEachIndexed { p, (key, name) ->
             main.postDelayed({
-                if (i % 2 == 0) sendAssistOn()
+                txXorKey = key
+                FrameLog.add("BLE", "==== PHASE ${p + 1}/3: $name ====")
+                status("Nav sweep ${p + 1}/3: $name — watch the cluster")
                 val m = latestAvgMileageRaw
                 val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
-                main.postDelayed({ sendNavStep("Turn left", line2, d, 15600, 1800L, picto) }, 700)
-            }, 1400 + i * 2200L)
+                sendAssistOn()
+                main.postDelayed({ sendNavStep("Turn left", line2, 120, 15600, 1800L, picto) }, 800)
+                main.postDelayed({ sendAssistOn() }, 3000)
+                main.postDelayed({ sendNavStep("Turn left", line2, 60, 15600, 1800L, picto) }, 3800)
+                main.postDelayed({ sendNavStep("Turn left", line2, 20, 15600, 1800L, picto) }, 5600)
+            }, p * 7000L)
         }
         main.postDelayed({
+            txXorKey = -1
             writeRaw("nav-stop", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Nav test done — did the cluster show a navigation screen? Export the log.")
-        }, 1400 + steps.size * 2200L + 800L)
+            status("Sweep done — which phase (1 RAW / 2 EA / 3 EB), if any, changed the cluster?")
+        }, phases.size * 7000L + 1000L)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

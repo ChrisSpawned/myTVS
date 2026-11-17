@@ -147,22 +147,20 @@ object MapProbe {
                             }
                         }
                     }
-                    // Scripted sends. Availability = "I have an image for you".
-                    val avail = byteArrayOf(0x05, 0x01, 0x00, 0x01, 0x00)
-                    val nav = byteArrayOf(0x05, 0x07, 0x00, 0x01, 0x00)
-                    var counter = 1
-                    repeat(10) { i ->
-                        // framed heartbeat: 5A 5A | ctrHi ctrLo | 5B 5B
-                        send(out, listener, "heartbeat", framed(byteArrayOf((counter shr 8).toByte(), counter.toByte())))
-                        counter++
-                        Thread.sleep(400)
-                        if (i == 1) send(out, listener, "avail(framed)", framed(avail))
-                        if (i == 2) send(out, listener, "avail(raw)", avail)
-                        if (i == 3) send(out, listener, "nav(framed)", framed(nav))
-                        if (i == 4) send(out, listener, "avail(no-len)", concat(PREFIX, avail, POSTFIX))
-                        Thread.sleep(600)
+                    // Exact heartbeat, reconstructed from the app's TCPClient.
+                    // First few are plain pulses; then we advertise a document is
+                    // available (cycling candidate values) to try to make the
+                    // cluster request the map image (it would reply 0xAA/BB/CC).
+                    var rolling = 1
+                    var counterNo = 0
+                    val availCandidates = listOf<Byte?>(null, null, null, 0x01, 0x02, 0x07, 0xFF.toByte(), 0x00, 0x01, 0x02)
+                    for (av in availCandidates) {
+                        val pkt = heartbeat(rolling, counterNo, av)
+                        send(out, listener, if (av == null) "pulse" else "pulse+avail(0x%02X)".format(av.toInt() and 0xFF), pkt)
+                        rolling++; counterNo++
+                        Thread.sleep(1200)
                     }
-                    reader.join(21000)
+                    reader.join(15000)
                 } finally {
                     runCatching { socket.close() }
                 }
@@ -179,10 +177,25 @@ object MapProbe {
     private val PREFIX = byteArrayOf(0x5A, 0x5A)
     private val POSTFIX = byteArrayOf(0x5B, 0x5B)
 
-    /** 5A 5A | len(2, big-endian) | payload | 5B 5B */
-    private fun framed(payload: ByteArray): ByteArray {
-        val len = byteArrayOf((payload.size shr 8).toByte(), payload.size.toByte())
-        return concat(PREFIX, len, payload, POSTFIX)
+    /**
+     * Exact pulse/heartbeat packet from TCPClient:
+     *   PREFIX | len(2) | noSignals(2) | checksum(1) | counterNo(2) | 00 00 | data | POSTFIX
+     * where data = [2,1,0,5, 'T'(0x54),'V'(0x56),0x53, rollHi, rollLo] (+ availability).
+     * checksum = sum(data) & 0xFF. len = total packet length.
+     */
+    private fun heartbeat(rolling: Int, counterNo: Int, docAvail: Byte?): ByteArray {
+        val sig = byteArrayOf(84, 86, 83, (rolling shr 8).toByte(), rolling.toByte())
+        val rollingData = byteArrayOf(2, 1, 0, 5) + sig
+        val avail = if (docAvail != null) byteArrayOf(5, 1, 0, 1, docAvail) else ByteArray(0)
+        val data = rollingData + avail
+        val ck = (data.fold(0) { a, b -> a + b } and 0xFF).toByte()
+        val noSignals = byteArrayOf(0, 4)
+        val cn = byteArrayOf((counterNo shr 8).toByte(), counterNo.toByte())
+        val zz = byteArrayOf(0, 0)
+        val ckB = byteArrayOf(ck)
+        val bodyLen = PREFIX.size + 2 + noSignals.size + ckB.size + cn.size + zz.size + data.size + POSTFIX.size
+        val lenB = byteArrayOf((bodyLen shr 8).toByte(), bodyLen.toByte())
+        return concat(PREFIX, lenB, noSignals, ckB, cn, zz, data, POSTFIX)
     }
 
     private fun concat(vararg parts: ByteArray): ByteArray {

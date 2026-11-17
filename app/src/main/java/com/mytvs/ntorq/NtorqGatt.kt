@@ -46,6 +46,8 @@ class NtorqGatt(
     private var device: BluetoothDevice? = null
     private var wantConnected = false
     private var writeChar: BluetoothGattCharacteristic? = null
+    private var mtu = 23
+    @Volatile private var latestAvgMileageRaw = -1
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
@@ -112,7 +114,15 @@ class NtorqGatt(
             writeChar = svc.getCharacteristic(WRITE)
             val props = writeChar?.properties ?: 0
             FrameLog.add("BLE", "write char ${if (writeChar != null) "ready" else "MISSING"} props=0x%02X".format(props))
+            // The 33-byte second-line (road-name) frame needs more than the
+            // default 20-byte payload, so ask for a bigger MTU.
+            main.post { g.requestMtu(247) }
             status("Subscribed — waiting for pairing / data…")
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, mtuValue: Int, st: Int) {
+            mtu = mtuValue
+            FrameLog.add("BLE", "MTU = $mtuValue (status $st)")
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, st: Int) {
@@ -242,27 +252,50 @@ class NtorqGatt(
             byteArrayOf(0xFF.toByte())
     }
 
-    private fun sendNavPair(text: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
-        writeRaw("nav-text \"$text\"", navTextFrame(text))
+    /**
+     * Second navigation text line (the cluster's road-name slot), reconstructed
+     * from BleNavigationSendData.sendNavigationControl2. A 33-byte frame:
+     *   5A 49 | text(≤22 UTF-8) | pad 0x00 | destArrived | 00 00 00 | FF
+     * We put the live mileage here instead of the road name.
+     */
+    private fun navControl2Frame(text: String, destArrived: Boolean): ByteArray {
+        val t = (if (text.length > 23) text.substring(0, 22) else text).toByteArray(Charsets.UTF_8)
+        val head = byteArrayOf(0x5A, 0x49) + t
+        val tail = byteArrayOf(if (destArrived) 1 else 0, 0, 0, 0, 0xFF.toByte())
+        val total = head.size + tail.size
+        val pad = ByteArray(if (total <= 33) 33 - total else 1)
+        return head + pad + tail
+    }
+
+    private fun sendNavStep(line1: String, line2: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
+        writeRaw("nav-L1 \"$line1\"", navTextFrame(line1))
         main.postDelayed({
-            writeRaw("nav-ctrl d=$distNextM picto=$picto", navControlFrame(distNextM, totalDistM, timeSec, picto, text.length > 17, false))
+            if (mtu - 3 >= 33) writeRaw("nav-L2 \"$line2\"", navControl2Frame(line2, false))
+            else FrameLog.add("BLE", "nav-L2 skipped: MTU $mtu too small for the 33-byte line-2 frame")
+        }, 150)
+        main.postDelayed({
+            writeRaw("nav-ctrl d=$distNextM picto=$picto", navControlFrame(distNextM, totalDistM, timeSec, picto, twoLines = false, stopped = false))
         }, 400)
     }
 
     /**
      * Fake a short live turn-by-turn so we can see whether the cluster switches
-     * to a navigation screen. Counts a "turn left" down from 250 m, then sends a
-     * nav-stopped frame to clear it.
+     * to a navigation screen. Line 1 = the turn, line 2 = the cluster's own live
+     * average mileage (decoded from telemetry). Ends with a nav-stopped frame.
      */
     fun sendNavTest(picto: Int = 4) {
-        status("Nav test: sending turn-by-turn frames…")
+        status("Nav test: sending turn-by-turn + mileage line…")
         val steps = listOf(250, 200, 150, 100, 60, 30, 10)
         steps.forEachIndexed { i, d ->
-            main.postDelayed({ sendNavPair("Turn left $d m", d, 2500 - i * 300, 480L, picto) }, i * 1800L)
+            main.postDelayed({
+                val m = latestAvgMileageRaw
+                val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
+                sendNavStep("Turn left", line2, d, 2500 - i * 300, 480L, picto)
+            }, i * 1800L)
         }
         main.postDelayed({
             writeRaw("nav-stop", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Nav test done — did the cluster show a navigation screen? Export the log.")
+            status("Nav test done — what did the cluster show (screen + line 2)? Export the log.")
         }, steps.size * 1800L + 600L)
     }
 
@@ -271,6 +304,9 @@ class NtorqGatt(
         val hex = NtorqCodec.hex(value)
         val frame = NtorqCodec.decode(value)
         if (frame != null) {
+            // Fuel-economy frame (SpeedOMeter3 candidate, id 0x16): average
+            // mileage sits at data byte 6, instantaneous at 7, range at 9..10.
+            if (frame.id == 0x16) latestAvgMileageRaw = frame.u(6)
             main.post { listener.onFrame(frame, hex) }
         } else {
             FrameLog.add("RX?", hex)

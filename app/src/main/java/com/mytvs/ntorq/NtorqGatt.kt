@@ -267,15 +267,29 @@ class NtorqGatt(
         return head + pad + tail
     }
 
+    /**
+     * Location / address frame, from BluetoothUtil.createCurrentLocationArray:
+     *   5B 5C | text(≤17 UTF-8) | pad 0x00 | FF
+     * The app sends this when navigation starts; it's the most likely trigger
+     * that switches the cluster into its navigation screen.
+     */
+    private fun navLocationFrame(text: String): ByteArray {
+        val t = text.take(17).toByteArray(Charsets.UTF_8)
+        val head = byteArrayOf(0x5B, 0x5C)
+        val pad = ByteArray(20 - (head.size + t.size + 1))
+        return head + t + pad + byteArrayOf(0xFF.toByte())
+    }
+
     private fun sendNavStep(line1: String, line2: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
-        writeRaw("nav-L1 \"$line1\"", navTextFrame(line1))
+        writeRaw("nav-loc", navLocationFrame("Navigation"))
+        main.postDelayed({ writeRaw("nav-L1 \"$line1\"", navTextFrame(line1)) }, 150)
         main.postDelayed({
             if (mtu - 3 >= 33) writeRaw("nav-L2 \"$line2\"", navControl2Frame(line2, false))
             else FrameLog.add("BLE", "nav-L2 skipped: MTU $mtu too small for the 33-byte line-2 frame")
-        }, 150)
+        }, 300)
         main.postDelayed({
             writeRaw("nav-ctrl d=$distNextM picto=$picto", navControlFrame(distNextM, totalDistM, timeSec, picto, twoLines = false, stopped = false))
-        }, 400)
+        }, 500)
     }
 
     /**

@@ -92,12 +92,18 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             text = "Handshake"
             setOnClickListener { onHandshakeClicked() }
         }
+        val imageBtn = Button(this).apply {
+            text = "Image probe (BLE)"
+            setOnClickListener { onImageProbeClicked() }
+        }
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun weighted() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         row.addView(connectBtn, weighted())
         row.addView(exportBtn, weighted())
         row2.addView(probeBtn, weighted())
         row2.addView(handshakeBtn, weighted())
+        row3.addView(imageBtn, weighted())
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -110,6 +116,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         inner.addView(statusView)
         inner.addView(row)
         inner.addView(row2)
+        inner.addView(row3)
         inner.addView(liveTitle)
         inner.addView(liveView)
         inner.addView(logTitle)
@@ -236,6 +243,18 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
                 main.post { status("Map-channel probe done. Export log to share."); refreshLog() }
             }
         })
+    }
+
+    private fun onImageProbeClicked() {
+        val g = gatt
+        if (g == null) {
+            toast("Connect to the cluster first")
+            return
+        }
+        status("Image-channel probe: sending INIT frames over BLE…")
+        FrameLog.add("BLE", "---- image-channel INIT probe start ----")
+        g.sendImageInitProbe()
+        refreshLog()
     }
 
     private fun onHandshakeClicked() {

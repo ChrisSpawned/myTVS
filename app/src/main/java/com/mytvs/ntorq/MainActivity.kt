@@ -75,7 +75,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             setOnClickListener { onConnectClicked() }
         }
         val exportBtn = Button(this).apply {
-            text = "Export log"
+            text = "Export"
             setOnClickListener {
                 try {
                     startActivity(FrameLog.exportIntent(this@MainActivity))
@@ -85,17 +85,19 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             }
         }
         val probeBtn = Button(this).apply {
-            text = "Probe map Wi-Fi"
+            text = "Wi-Fi probe"
             setOnClickListener { onProbeClicked() }
         }
-        row.addView(connectBtn)
-        row.addView(exportBtn)
-        row.addView(probeBtn)
         val handshakeBtn = Button(this).apply {
-            text = "Map handshake"
+            text = "Handshake"
             setOnClickListener { onHandshakeClicked() }
         }
-        row.addView(handshakeBtn)
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        fun weighted() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        row.addView(connectBtn, weighted())
+        row.addView(exportBtn, weighted())
+        row2.addView(probeBtn, weighted())
+        row2.addView(handshakeBtn, weighted())
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -107,6 +109,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         inner.addView(title)
         inner.addView(statusView)
         inner.addView(row)
+        inner.addView(row2)
         inner.addView(liveTitle)
         inner.addView(liveView)
         inner.addView(logTitle)

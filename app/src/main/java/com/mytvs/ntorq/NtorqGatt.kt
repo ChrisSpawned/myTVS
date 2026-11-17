@@ -151,6 +151,21 @@ class NtorqGatt(
      * exactly as the official app does with isChecksumNeeded=false.
      */
     @SuppressLint("MissingPermission")
+    /**
+     * Outgoing encryption, matching the app's BluetoothUtil.encryptData for the
+     * default (non-listed) bike types: keep the start byte and ID, XOR the body
+     * (indices 2 .. len-2) with the key, leave the trailing 0xFF. The W626 Ntorq
+     * is an older variant not in the no-encrypt list, so its writes are encrypted.
+     * Key 0xEB = getKeyByteArray (-21).
+     */
+    var txXorKey: Int = 0xEB
+    private fun encrypt(frame: ByteArray): ByteArray {
+        if (txXorKey < 0) return frame
+        val out = frame.copyOf()
+        for (i in 2 until out.size - 1) out[i] = (out[i].toInt() xor txXorKey).toByte()
+        return out
+    }
+
     fun writeRaw(label: String, bytes: ByteArray): Boolean {
         val g = gatt
         val ch = writeChar
@@ -162,13 +177,15 @@ class NtorqGatt(
         val canResp = (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
         val type = if (canResp) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        FrameLog.add("TX-BLE", "$label: ${NtorqCodec.hex(bytes)}")
+        val wire = encrypt(bytes)
+        FrameLog.add("TX-BLE", "$label: ${NtorqCodec.hex(bytes)}" +
+            if (txXorKey >= 0) " -> enc ${NtorqCodec.hex(wire)}" else "")
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            g.writeCharacteristic(ch, bytes, type) == BluetoothStatusCodes.SUCCESS
+            g.writeCharacteristic(ch, wire, type) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION") run {
                 ch.writeType = type
-                ch.value = bytes
+                ch.value = wire
                 g.writeCharacteristic(ch)
             }
         }

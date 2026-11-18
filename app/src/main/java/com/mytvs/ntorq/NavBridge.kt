@@ -14,8 +14,7 @@ import android.os.Looper
  *
  * Cluster nav screen layout: arrow + distance-to-turn, and a bottom row with
  * ETA (derived by the cluster from the minutes field), minutes remaining and
- * total distance remaining. The total-distance field always carries the CURRENT
- * fuel economy instead (42 kmpl shows as "42.0km"), as the rider asked.
+ * total distance remaining (from Google Maps when it provides it).
  */
 object NavBridge {
     @Volatile var gatt: NtorqGatt? = null
@@ -96,10 +95,7 @@ object NavBridge {
         estAt = now
         val dist = estDistM?.let { Math.round(it).toInt() } ?: 0
         val minutes = n.remainingMin ?: 0
-        // kmpl slot ("km" on the cluster): live kmpl if the cluster ever sends it,
-        // otherwise the cluster's own average (the W626 cluster leaves live kmpl at 0).
-        val kmpl = g.currentKmplRaw().takeIf { it > 0 } ?: g.averageKmplRaw().coerceAtLeast(0)
-        val totalM = kmpl * 1000
+        val totalM = n.remainingM ?: 0
         val picto = MapsParser.picto(n.maneuver, n.roundaboutExit)
         if (tickCount++ % 4 == 0) g.navPush(n.instruction, dist, minutes, totalM, picto)
         else g.navPushControl(n.instruction, dist, minutes, totalM, picto)

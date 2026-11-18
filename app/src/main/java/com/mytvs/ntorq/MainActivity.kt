@@ -34,8 +34,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 /**
- * Rider dashboard: connection, live fuel economy, and the Google Maps turn that
- * is being mirrored to the cluster. Probes and logs live under Developer tools.
+ * Rider dashboard: connection and the Google Maps turn that is being mirrored
+ * to the cluster. Export log lives under Developer tools.
  */
 class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
@@ -51,9 +51,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
     // Views
     private lateinit var pill: TextView
-    private lateinit var kmplNow: TextView
-    private lateinit var kmplAvg: TextView
-    private lateinit var kmplLabel: TextView
     private lateinit var navArrow: TextView
     private lateinit var navDist: TextView
     private lateinit var navInstr: TextView
@@ -173,21 +170,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         header.addView(pill)
         col.addView(header)
 
-        // Fuel economy
-        val fuel = cardBox()
-        kmplLabel = label("Fuel economy")
-        fuel.addView(kmplLabel)
-        val nowRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
-        kmplNow = text(72f, accent, true, "--").apply { includeFontPadding = false }
-        nowRow.addView(kmplNow)
-        nowRow.addView(text(20f, muted, true, "  kmpl").apply { setPadding(0, 0, 0, dp(12)) })
-        fuel.addView(nowRow, lp(4))
-        kmplAvg = text(15f, muted, false, "Speed —")
-        fuel.addView(kmplAvg, lp(2))
-        fuel.addView(text(12f, muted, false, "During navigation this shows on the cluster in the km slot. " +
-            "Your cluster reports average economy only — it doesn't send a live figure."), lp(10))
-        col.addView(fuel, lp(20))
-
         // Navigation
         val nav = cardBox()
         val navHead = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
@@ -214,7 +196,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         nav.addView(navInstr, lp(12))
         navMeta = text(14f, muted, false)
         nav.addView(navMeta, lp(4))
-        col.addView(nav, lp(14))
+        col.addView(nav, lp(20))
 
         // Maps access (only when missing)
         val access = cardBox().apply { background = rounded(Color.parseColor("#1F1A10"), 20, Color.parseColor("#4A3A17")) }
@@ -302,14 +284,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             if (g == null) rounded(accent, 16) else rounded(card, 16, stroke), null,
         )
         connectBtn.setTextColor(if (g == null) bg else fg)
-
-        // Fuel
-        val live = g?.currentKmplRaw() ?: -1
-        val avg = g?.averageKmplRaw() ?: -1
-        val shown = if (live > 0) live else avg
-        kmplNow.text = if (shown >= 0) "$shown" else "--"
-        kmplLabel.text = (if (live > 0) "Fuel economy · live" else "Fuel economy · average").uppercase()
-        kmplAvg.text = if (g != null && g.isLive) "Speed  ${g.speedKmh} km/h" else "Speed —"
 
         // Navigation
         val n = NavBridge.current

@@ -48,15 +48,6 @@ class NtorqGatt(
     private var wantConnected = false
     private var writeChar: BluetoothGattCharacteristic? = null
     private var mtu = 23
-    @Volatile private var latestAvgMileageRaw = -1
-    @Volatile private var latestInstantMileageRaw = -1
-
-    /** Current (instantaneous) fuel economy, raw kmpl from frame 0x16 byte 7; -1 = not yet seen. */
-    fun currentKmplRaw(): Int = latestInstantMileageRaw
-
-    /** Average fuel economy, raw kmpl from frame 0x16 byte 6; -1 = not yet seen. */
-    fun averageKmplRaw(): Int = latestAvgMileageRaw
-
     /** Road speed in km/h from frame 0x10 byte 0 (confirmed on a ride: 0–48 km/h). */
     @Volatile var speedKmh: Int = 0
         private set
@@ -186,35 +177,19 @@ class NtorqGatt(
         return out
     }
 
-    /**
-     * BluetoothUtil.addChecksum: byte[len-2] = 255 - (sum of bytes[0 .. len-3] mod 256),
-     * same formula the cluster uses on the frames it sends us. Applied before encryption.
-     */
-    private fun withChecksum(frame: ByteArray): ByteArray {
-        val out = frame.copyOf()
-        var sum = 0
-        for (i in 0 until out.size - 2) sum += out[i].toInt() and 0xFF
-        out[out.size - 2] = (255 - (sum % 256)).toByte()
-        return out
-    }
-
     // ---- Write queue ------------------------------------------------------
     // Android allows one GATT write in flight at a time. The official app pushes
     // every write through a command queue (BluetoothPeripheral.enqueue) and only
     // starts the next one when the previous write completes. With the 2-second
     // heartbeat running underneath navigation we must do the same, or writes
     // collide and are silently dropped.
-    private class PendingWrite(val label: String, val bytes: ByteArray, val key: Int?, val checksum: Boolean)
+    private class PendingWrite(val label: String, val bytes: ByteArray, val key: Int?)
     private val queue = ArrayDeque<PendingWrite>()
     private var writeBusy = false
     private var busySince = 0L
 
-    /** Queue a frame for the cluster. Frames are encrypted at send time. */
-    /**
-     * key = null -> use the current txXorKey; checksum = true -> fill byte[18] with
-     * the cluster's checksum before encrypting.
-     */
-    fun writeRaw(label: String, bytes: ByteArray, key: Int? = null, checksum: Boolean = false): Boolean {
+    /** Queue a frame for the cluster (encrypted at send time; key = null -> txXorKey). */
+    fun writeRaw(label: String, bytes: ByteArray, key: Int? = null): Boolean {
         if (bytes.size != 20) {
             // BluetoothPeripheral.writeCharacteristicNtorq refuses any frame that
             // is not exactly 20 bytes, so the official app never sends one.
@@ -222,7 +197,7 @@ class NtorqGatt(
             return false
         }
         main.post {
-            queue.addLast(PendingWrite(label, bytes, key, checksum))
+            queue.addLast(PendingWrite(label, bytes, key))
             pump()
         }
         return true
@@ -249,10 +224,9 @@ class NtorqGatt(
         val type = if (noResp) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val k = next.key ?: txXorKey
-        val plain = if (next.checksum) withChecksum(next.bytes) else next.bytes
+        val plain = next.bytes
         val wire = encrypt(plain, k)
         FrameLog.add("TX-BLE", "${next.label}: ${NtorqCodec.hex(plain)}" +
-            (if (next.checksum) " [chk]" else "") +
             if (k >= 0) " -> enc ${NtorqCodec.hex(wire)}" else " (raw)")
         val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeCharacteristic(ch, wire, type) == BluetoothStatusCodes.SUCCESS
@@ -283,40 +257,6 @@ class NtorqGatt(
             writeBusy = false
             pump()
         }
-    }
-
-    /**
-     * Build the cluster's image-transfer INIT frame (ID 0x53), reconstructed from
-     * BLEImageTransferUtils.byteArrayForInitImageTransfer:
-     *   5A 53 | picNo | totalFrames(2) | frameNo(2) | state | subtype | name… | pad… | FF
-     * picNo 4 = profile image (subtype 5), 5 = caller image (subtype 10).
-     */
-    private fun imageInitFrame(picNo: Int, subtype: Int, totalFrames: Int, name: String): ByteArray {
-        var nameBytes = name.toByteArray(Charsets.UTF_8)
-        if (nameBytes.size > 10) nameBytes = nameBytes.copyOf(10)
-        val head = byteArrayOf(
-            0x5A, 0x53,
-            picNo.toByte(),
-            ((totalFrames shr 8) and 0xFF).toByte(), (totalFrames and 0xFF).toByte(),
-            0x00, 0x01,              // frameNo = 1
-            0x01,                    // state = in progress
-            subtype.toByte(),
-        )
-        val padLen = 20 - (head.size + nameBytes.size + 1)
-        val pad = ByteArray(if (padLen > 0) padLen else 0)
-        return head + nameBytes + pad + byteArrayOf(0xFF.toByte())
-    }
-
-    /**
-     * Probe the image channel: send the profile + caller INIT frames and watch
-     * whether the cluster answers on the notify characteristic (any non-telemetry
-     * frame = the image channel is alive on this cluster).
-     */
-    fun sendImageInitProbe() {
-        main.post { writeRaw("img-init profile (picNo=4)", imageInitFrame(4, 5, 74, "Test")) }
-        main.postDelayed({ writeRaw("img-init caller (picNo=5)", imageInitFrame(5, 10, 33, "Test")) }, 2500)
-        main.postDelayed({ writeRaw("img-init profile x2", imageInitFrame(4, 5, 74, "Test")) }, 5000)
-        status("Sent image-channel INIT frames — watch the log for a cluster reply.")
     }
 
     // ---- Navigation (turn-by-turn) --------------------------------------
@@ -509,67 +449,6 @@ class NtorqGatt(
         }, 400)
     }
 
-    /**
-     * One ~22 s pass that replays exactly what the official app sent when nav
-     * worked on your cluster: "Turn left onto Club Road", pictogram 0, 15.6 km,
-     * 30 min, distance counting down — plus our mileage on line two halfway.
-     */
-    private fun navPass(t0: Long, key: Int, name: String, n: Int, of: Int) {
-        val instruction = "Turn left onto Club Road"
-        main.postDelayed({
-            txXorKey = key
-            FrameLog.add("BLE", "==== PASS $n/$of: $name ====")
-            status("Nav pass $n/$of ($name) — watch the cluster")
-            writeRaw("rider-name 5B52", customTextFrame(riderName, 0x52))
-        }, t0)
-        main.postDelayed({ sendAssistOn() }, t0 + 500)
-        main.postDelayed({ sendAssistOn() }, t0 + 2600)
-        for (i in 0 until 15) {
-            val dist = 300 - i * 20
-            main.postDelayed({ sendNavPair(instruction, dist, 15600 - i * 20, 1800L - i, 0) }, t0 + 4700 + i * 1000L)
-        }
-        main.postDelayed({
-            val m = latestAvgMileageRaw
-            val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
-            writeRaw("line-two 5B63 \"$line2\"", customTextFrame(line2, 0x63))
-        }, t0 + 12_300)
-        main.postDelayed({
-            writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-        }, t0 + 20_200)
-    }
-
-    /**
-     * Nav test (v0.15.0): everything 0xEA-encoded, navOnOff = 0xFF while navigating.
-     * Right turn counting 250 m -> 30 m with text, kmpl on line two, then a proper
-     * stop (navOnOff = 0x00) which should close the nav screen.
-     */
-    fun sendNavTest() {
-        if (!sessionOn) startSession()
-        txXorKey = 0xEA
-        val right = 16        // U577 Premium picto: mmi 3 (turn right) -> "10" hex -> 16
-        val instruction = "Turn right TEST"
-        FrameLog.add("BLE", "==== NAV TEST v0.15: 0xEA, navOnOff=FF, right turn ====")
-        status("Nav test: switching cluster to nav screen…")
-        main.postDelayed({ sendAssistOn() }, 300)
-        main.postDelayed({ sendAssistOn() }, 2400)
-        for (i in 0 until 12) {
-            val dist = 250 - i * 20
-            main.postDelayed({
-                if (i == 0) status("Nav test: right turn, $dist m counting down — watch the cluster")
-                sendNavPair(instruction, dist, 15600 - i * 20, 1800L - i * 10, right)
-            }, 4500L + i * 1000L)
-        }
-        main.postDelayed({
-            val m = latestAvgMileageRaw
-            val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
-            writeRaw("line-two 5B63 \"$line2\"", customTextFrame(line2, 0x63))
-        }, 10_900)
-        main.postDelayed({
-            writeRaw("nav-stop 5A4E (navOnOff=00)", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Nav test done — the nav screen should have closed. What did you see?")
-        }, 17_200)
-    }
-
     // ---- Live navigation API (used by NavBridge) -------------------------
     /** Switch the cluster to its nav screen (assist-on pair twice, ~2.1 s apart, like the app). */
     fun navStart() {
@@ -605,14 +484,9 @@ class NtorqGatt(
         val hex = NtorqCodec.hex(value)
         val frame = NtorqCodec.decode(value)
         if (frame != null) {
-            // Fuel-economy frame (SpeedOMeter3 candidate, id 0x16): average
-            // mileage sits at data byte 6, instantaneous at 7, range at 9..10.
             isLive = true
+            // Road speed (frame 0x10 byte 0) drives the distance-to-turn countdown.
             if (frame.id == 0x10) speedKmh = frame.u(0)
-            if (frame.id == 0x16) {
-                latestAvgMileageRaw = frame.u(6)       // AVERAGE_FUEL_ECONOMY (frame byte 9)
-                latestInstantMileageRaw = frame.u(7)   // INSTANTANEOUS_FUEL_ECONOMY (frame byte 10)
-            }
             main.post { listener?.onFrame(frame, hex) }
         } else {
             FrameLog.add("RX?", hex)

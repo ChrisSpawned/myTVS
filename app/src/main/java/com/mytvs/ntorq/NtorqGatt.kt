@@ -162,10 +162,22 @@ class NtorqGatt(
      * navigation from RAW frames (pass 2); the 0xEA pass was ignored. So raw it is.
      */
     var txXorKey: Int = -1
-    private fun encrypt(frame: ByteArray): ByteArray {
-        if (txXorKey < 0) return frame
+    private fun encrypt(frame: ByteArray, key: Int = txXorKey): ByteArray {
+        if (key < 0) return frame
         val out = frame.copyOf()
-        for (i in 2 until out.size - 1) out[i] = (out[i].toInt() xor txXorKey).toByte()
+        for (i in 2 until out.size - 1) out[i] = (out[i].toInt() xor key).toByte()
+        return out
+    }
+
+    /**
+     * BluetoothUtil.addChecksum: byte[len-2] = 255 - (sum of bytes[0 .. len-3] mod 256),
+     * same formula the cluster uses on the frames it sends us. Applied before encryption.
+     */
+    private fun withChecksum(frame: ByteArray): ByteArray {
+        val out = frame.copyOf()
+        var sum = 0
+        for (i in 0 until out.size - 2) sum += out[i].toInt() and 0xFF
+        out[out.size - 2] = (255 - (sum % 256)).toByte()
         return out
     }
 
@@ -175,13 +187,17 @@ class NtorqGatt(
     // starts the next one when the previous write completes. With the 2-second
     // heartbeat running underneath navigation we must do the same, or writes
     // collide and are silently dropped.
-    private class PendingWrite(val label: String, val bytes: ByteArray)
+    private class PendingWrite(val label: String, val bytes: ByteArray, val key: Int?, val checksum: Boolean)
     private val queue = ArrayDeque<PendingWrite>()
     private var writeBusy = false
     private var busySince = 0L
 
     /** Queue a frame for the cluster. Frames are encrypted at send time. */
-    fun writeRaw(label: String, bytes: ByteArray): Boolean {
+    /**
+     * key = null -> use the current txXorKey; checksum = true -> fill byte[18] with
+     * the cluster's checksum before encrypting.
+     */
+    fun writeRaw(label: String, bytes: ByteArray, key: Int? = null, checksum: Boolean = false): Boolean {
         if (bytes.size != 20) {
             // BluetoothPeripheral.writeCharacteristicNtorq refuses any frame that
             // is not exactly 20 bytes, so the official app never sends one.
@@ -189,7 +205,7 @@ class NtorqGatt(
             return false
         }
         main.post {
-            queue.addLast(PendingWrite(label, bytes))
+            queue.addLast(PendingWrite(label, bytes, key, checksum))
             pump()
         }
         return true
@@ -215,9 +231,12 @@ class NtorqGatt(
         val noResp = (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) == 0
         val type = if (noResp) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
         else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        val wire = encrypt(next.bytes)
-        FrameLog.add("TX-BLE", "${next.label}: ${NtorqCodec.hex(next.bytes)}" +
-            if (txXorKey >= 0) " -> enc ${NtorqCodec.hex(wire)}" else " (raw)")
+        val k = next.key ?: txXorKey
+        val plain = if (next.checksum) withChecksum(next.bytes) else next.bytes
+        val wire = encrypt(plain, k)
+        FrameLog.add("TX-BLE", "${next.label}: ${NtorqCodec.hex(plain)}" +
+            (if (next.checksum) " [chk]" else "") +
+            if (k >= 0) " -> enc ${NtorqCodec.hex(wire)}" else " (raw)")
         val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeCharacteristic(ch, wire, type) == BluetoothStatusCodes.SUCCESS
         } else {
@@ -494,14 +513,53 @@ class NtorqGatt(
         }, t0 + 20_200)
     }
 
-    /** Nav test: one ~22 s replay, raw encoding (confirmed working on this cluster). */
+    /**
+     * Nav probe (v0.14.0). v0.13 showed the nav screen (left arrow, 0 m, no text):
+     * that is probably just the assist-on screen's empty default, meaning our turn
+     * frames (5B 4F text, 5A 4E control) may still be ignored. Each variant below is
+     * a RIGHT turn with its own distance, so whatever the cluster shows identifies
+     * the variant it accepted:
+     *   A  111 m  raw,  no checksum
+     *   B  222 m  raw,  checksum at byte 18
+     *   C  333 m  XOR 0xEA, no checksum
+     *   D  444 m  XOR 0xEA, checksum at byte 18
+     * Heartbeat and assist-on stay raw (they worked).
+     */
     fun sendNavTest() {
         if (!sessionOn) startSession()
-        navPass(0, -1, "raw", 1, 1)
+        txXorKey = -1
+        val right = 16     // U577 Premium picto: mmi 3 (turn right) -> "10" hex -> 16
+        FrameLog.add("BLE", "==== NAV PROBE: assist-on, then variants A-D (right turn) ====")
+        status("Probe: switching cluster to nav screen…")
+        main.postDelayed({ sendAssistOn() }, 300)
+        main.postDelayed({ sendAssistOn() }, 2400)
+        data class V(val tag: String, val dist: Int, val key: Int, val chk: Boolean, val desc: String)
+        val vs = listOf(
+            V("A", 111, -1, false, "raw, no checksum"),
+            V("B", 222, -1, true, "raw + checksum"),
+            V("C", 333, 0xEA, false, "XOR EA, no checksum"),
+            V("D", 444, 0xEA, true, "XOR EA + checksum"),
+        )
+        vs.forEachIndexed { idx, v ->
+            val t = 4500L + idx * 6000L
+            main.postDelayed({
+                FrameLog.add("BLE", "==== VARIANT ${v.tag}: ${v.dist} m, ${v.desc} ====")
+                status("Variant ${v.tag} (${v.dist} m, ${v.desc}) — what does the cluster show?")
+            }, t)
+            for (r in 0 until 5) {
+                main.postDelayed({
+                    writeRaw("${v.tag} nav-text 5B4F", navTextFrame("${v.tag} TEST ${v.dist}"), v.key, v.chk)
+                }, t + r * 1000L)
+                main.postDelayed({
+                    writeRaw("${v.tag} nav-ctrl 5A4E d=${v.dist} picto=$right",
+                        navControlFrame(v.dist, 15600, 1800L, right, twoLines = false, stopped = false), v.key, v.chk)
+                }, t + r * 1000L + 400)
+            }
+        }
         main.postDelayed({
-            txXorKey = -1
-            status("Nav test done. Did the arrow, \"Turn left onto Cl\" and the kmpl line show?")
-        }, 22_000)
+            writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
+            status("Probe done. Tell me the highest distance number you saw (111/222/333/444), the arrow direction, and any text.")
+        }, 4500L + vs.size * 6000L + 500)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

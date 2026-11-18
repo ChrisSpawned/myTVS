@@ -1,7 +1,6 @@
 package com.mytvs.ntorq
 
 import android.content.Context
-import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
 
@@ -15,28 +14,24 @@ import android.os.Looper
  *
  * Cluster nav screen layout: arrow + distance-to-turn, and a bottom row with
  * ETA (derived by the cluster from the minutes field), minutes remaining and
- * total distance remaining. With "kmpl in distance slot" on, the total-distance
- * field carries the CURRENT fuel economy instead (42 kmpl shows as "42.0km").
+ * total distance remaining. The total-distance field always carries the CURRENT
+ * fuel economy instead (42 kmpl shows as "42.0km"), as the rider asked.
  */
 object NavBridge {
     @Volatile var gatt: NtorqGatt? = null
     @Volatile var statusListener: ((String) -> Unit)? = null
 
     private val main = Handler(Looper.getMainLooper())
-    private var prefs: SharedPreferences? = null
     @Volatile private var info: NavInfo? = null
+    /** The turn currently being shown on the cluster, or null when not navigating. */
+    val current: NavInfo? get() = info
     @Volatile var isActive = false
         private set
     var lastStatus = "Waiting for Google Maps navigation…"
         private set
 
-    fun init(ctx: Context) {
-        if (prefs == null) prefs = ctx.applicationContext.getSharedPreferences("nav", Context.MODE_PRIVATE)
-    }
-
-    var kmplInDistanceSlot: Boolean
-        get() = prefs?.getBoolean("kmplInDistanceSlot", true) ?: true
-        set(v) { prefs?.edit()?.putBoolean("kmplInDistanceSlot", v)?.apply() }
+    @Suppress("UNUSED_PARAMETER")
+    fun init(ctx: Context) { /* reserved */ }
 
     /** Called on the main thread for every parsed Maps notification update. */
     fun onMapsUpdate(n: NavInfo) {
@@ -73,11 +68,7 @@ object NavBridge {
         val g = gatt ?: return
         val n = info ?: return
         val minutes = n.remainingMin ?: 0
-        val totalM = if (kmplInDistanceSlot) {
-            g.currentKmplRaw().coerceAtLeast(0) * 1000
-        } else {
-            n.remainingM ?: 0
-        }
+        val totalM = g.currentKmplRaw().coerceAtLeast(0) * 1000   // current kmpl in the "km" slot
         g.navPush(n.instruction, n.distNextM ?: 0, minutes, totalM, MapsParser.picto(n.maneuver, n.roundaboutExit))
     }
 

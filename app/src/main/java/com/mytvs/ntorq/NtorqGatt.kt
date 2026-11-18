@@ -54,6 +54,13 @@ class NtorqGatt(
     /** Current (instantaneous) fuel economy, raw kmpl from frame 0x16 byte 7; -1 = not yet seen. */
     fun currentKmplRaw(): Int = latestInstantMileageRaw
 
+    /** Average fuel economy, raw kmpl from frame 0x16 byte 6; -1 = not yet seen. */
+    fun averageKmplRaw(): Int = latestAvgMileageRaw
+
+    /** True once the cluster is streaming telemetry to us. */
+    @Volatile var isLive = false
+        private set
+
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
         this.device = device
@@ -93,6 +100,7 @@ class NtorqGatt(
                 status("Connected — discovering services…")
                 main.post { g.discoverServices() }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                isLive = false
                 main.post { stopSession() }
                 reconnectSoon()
             }
@@ -586,6 +594,7 @@ class NtorqGatt(
         if (frame != null) {
             // Fuel-economy frame (SpeedOMeter3 candidate, id 0x16): average
             // mileage sits at data byte 6, instantaneous at 7, range at 9..10.
+            isLive = true
             if (frame.id == 0x16) {
                 latestAvgMileageRaw = frame.u(6)       // AVERAGE_FUEL_ECONOMY (frame byte 9)
                 latestInstantMileageRaw = frame.u(7)   // INSTANTANEOUS_FUEL_ECONOMY (frame byte 10)

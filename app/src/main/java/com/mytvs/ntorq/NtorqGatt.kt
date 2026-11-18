@@ -20,7 +20,7 @@ import java.util.UUID
  * Connects, lets Android bond, subscribes to notifications and decodes telemetry.
  * Like the official app, it then runs a phone session: rider name once, and a
  * phone-status heartbeat (5B 4A) every 2 s. All writes are 20-byte frames,
- * sent raw (confirmed on the scooter), one at a time.
+ * XOR-0xEA encoded (encryptDataU577Premium), one at a time.
  *
  * Writes are limited to display/status frames the official app sends (phone
  * status, rider name, navigation text/arrows). It never sends vehicle-control or
@@ -158,10 +158,11 @@ class NtorqGatt(
      * on EVERY write: keep bytes [0] and [1], XOR bytes [2 .. len-2] with
      * getKeyByteArrayForNtorqU577 (= 0xEA at every position), keep the trailing 0xFF.
      * (U_577_BASE, type 37, sends raw.) -1 = raw.
-     * CONFIRMED ON THE SCOOTER (v0.12.0 test, 2026-11-18): the cluster renders
-     * navigation from RAW frames (pass 2); the 0xEA pass was ignored. So raw it is.
+     * Confirmed on the scooter: the 0xEA-encoded frames are the ones the cluster
+     * accepts (v0.12's left-arrow/0 m screen came from the 0xEA pass's last frame;
+     * an all-raw run in v0.14 produced nothing, not even the phone icons).
      */
-    var txXorKey: Int = -1
+    var txXorKey: Int = 0xEA
     private fun encrypt(frame: ByteArray, key: Int = txXorKey): ByteArray {
         if (key < 0) return frame
         val out = frame.copyOf()
@@ -341,7 +342,10 @@ class NtorqGatt(
             be3(totalDistM) +
             byteArrayOf(picto.toByte()) +
             byteArrayOf(if (twoLines) 2 else 1) +
-            byteArrayOf(if (stopped) 0xFF.toByte() else 0x00) +
+            // navOnOff for vehicle types 37/38, from the raw bytecode of
+            // byteArrayForIceBikeNavigation (the readable decompile had it inverted):
+            // navigating = 0xFF, stopped = 0x00.
+            byteArrayOf(if (stopped) 0x00 else 0xFF.toByte()) +
             byteArrayOf(0, 0, 0, 0, 0, 0, 0) +
             byteArrayOf(0xFF.toByte())
     }
@@ -514,52 +518,35 @@ class NtorqGatt(
     }
 
     /**
-     * Nav probe (v0.14.0). v0.13 showed the nav screen (left arrow, 0 m, no text):
-     * that is probably just the assist-on screen's empty default, meaning our turn
-     * frames (5B 4F text, 5A 4E control) may still be ignored. Each variant below is
-     * a RIGHT turn with its own distance, so whatever the cluster shows identifies
-     * the variant it accepted:
-     *   A  111 m  raw,  no checksum
-     *   B  222 m  raw,  checksum at byte 18
-     *   C  333 m  XOR 0xEA, no checksum
-     *   D  444 m  XOR 0xEA, checksum at byte 18
-     * Heartbeat and assist-on stay raw (they worked).
+     * Nav test (v0.15.0): everything 0xEA-encoded, navOnOff = 0xFF while navigating.
+     * Right turn counting 250 m -> 30 m with text, kmpl on line two, then a proper
+     * stop (navOnOff = 0x00) which should close the nav screen.
      */
     fun sendNavTest() {
         if (!sessionOn) startSession()
-        txXorKey = -1
-        val right = 16     // U577 Premium picto: mmi 3 (turn right) -> "10" hex -> 16
-        FrameLog.add("BLE", "==== NAV PROBE: assist-on, then variants A-D (right turn) ====")
-        status("Probe: switching cluster to nav screen…")
+        txXorKey = 0xEA
+        val right = 16        // U577 Premium picto: mmi 3 (turn right) -> "10" hex -> 16
+        val instruction = "Turn right TEST"
+        FrameLog.add("BLE", "==== NAV TEST v0.15: 0xEA, navOnOff=FF, right turn ====")
+        status("Nav test: switching cluster to nav screen…")
         main.postDelayed({ sendAssistOn() }, 300)
         main.postDelayed({ sendAssistOn() }, 2400)
-        data class V(val tag: String, val dist: Int, val key: Int, val chk: Boolean, val desc: String)
-        val vs = listOf(
-            V("A", 111, -1, false, "raw, no checksum"),
-            V("B", 222, -1, true, "raw + checksum"),
-            V("C", 333, 0xEA, false, "XOR EA, no checksum"),
-            V("D", 444, 0xEA, true, "XOR EA + checksum"),
-        )
-        vs.forEachIndexed { idx, v ->
-            val t = 4500L + idx * 6000L
+        for (i in 0 until 12) {
+            val dist = 250 - i * 20
             main.postDelayed({
-                FrameLog.add("BLE", "==== VARIANT ${v.tag}: ${v.dist} m, ${v.desc} ====")
-                status("Variant ${v.tag} (${v.dist} m, ${v.desc}) — what does the cluster show?")
-            }, t)
-            for (r in 0 until 5) {
-                main.postDelayed({
-                    writeRaw("${v.tag} nav-text 5B4F", navTextFrame("${v.tag} TEST ${v.dist}"), v.key, v.chk)
-                }, t + r * 1000L)
-                main.postDelayed({
-                    writeRaw("${v.tag} nav-ctrl 5A4E d=${v.dist} picto=$right",
-                        navControlFrame(v.dist, 15600, 1800L, right, twoLines = false, stopped = false), v.key, v.chk)
-                }, t + r * 1000L + 400)
-            }
+                if (i == 0) status("Nav test: right turn, $dist m counting down — watch the cluster")
+                sendNavPair(instruction, dist, 15600 - i * 20, 1800L - i * 10, right)
+            }, 4500L + i * 1000L)
         }
         main.postDelayed({
-            writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Probe done. Tell me the highest distance number you saw (111/222/333/444), the arrow direction, and any text.")
-        }, 4500L + vs.size * 6000L + 500)
+            val m = latestAvgMileageRaw
+            val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
+            writeRaw("line-two 5B63 \"$line2\"", customTextFrame(line2, 0x63))
+        }, 10_900)
+        main.postDelayed({
+            writeRaw("nav-stop 5A4E (navOnOff=00)", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
+            status("Nav test done — the nav screen should have closed. What did you see?")
+        }, 17_200)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

@@ -63,8 +63,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private lateinit var statusView: TextView
     private lateinit var devBox: LinearLayout
     private lateinit var devToggle: TextView
-    private lateinit var liveView: TextView
-    private lateinit var logView: TextView
 
     private var gatt: NtorqGatt? = null
     private var scanning = false
@@ -72,7 +70,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private val adapter: BluetoothAdapter? by lazy {
         (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
     }
-    private val latest = LinkedHashMap<Int, String>()
 
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -243,7 +240,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             setOnClickListener {
                 devBox.visibility = if (devBox.visibility == View.VISIBLE) View.GONE else View.VISIBLE
                 devToggle.text = if (devBox.visibility == View.VISIBLE) "Developer tools  ▴" else "Developer tools  ▾"
-                refreshLog()
             }
         }
         col.addView(devToggle, lp(8))
@@ -255,14 +251,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
                     LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { if (i > 0) leftMargin = dp(8) })
             }
         }
-        devBox.addView(devRow("Nav test" to ::onNavTestClicked, "Export log" to ::onExportClicked), lp(8))
-        devBox.addView(devRow("Wi-Fi probe" to ::onProbeClicked, "Handshake" to ::onHandshakeClicked, "Image probe" to ::onImageProbeClicked), lp(8))
-        liveView = mono()
-        logView = mono()
-        devBox.addView(label("Live frames"), lp(16))
-        devBox.addView(liveView, lp(6))
-        devBox.addView(label("Log"), lp(16))
-        devBox.addView(logView, lp(6))
+        devBox.addView(devRow("Export log" to ::onExportClicked), lp(8))
         col.addView(devBox)
 
         return ScrollView(this).apply {
@@ -270,12 +259,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             isFillViewport = true
             addView(col)
         }
-    }
-
-    private fun mono() = TextView(this).apply {
-        typeface = Typeface.MONOSPACE
-        textSize = 11f
-        setTextColor(muted)
     }
 
     // ---------------------------------------------------------------- refresh
@@ -349,7 +332,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         val granted = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
         accessCard.visibility = if (granted) View.GONE else View.VISIBLE
 
-        if (devBox.visibility == View.VISIBLE) refreshLog()
     }
 
     // ---------------------------------------------------------------- connect
@@ -433,18 +415,10 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
     override fun onFrame(frame: NtorqCodec.Frame, rawHex: String) {
         FrameLog.add("RX", "5A%02X  %s".format(frame.id, rawHex))
-        if (devBox.visibility == View.VISIBLE) {
-            latest[frame.id] = Telemetry.line(frame)
-            liveView.text = latest.values.joinToString("\n")
-        }
     }
 
     private fun status(text: String) {
         statusView.text = text
-    }
-
-    private fun refreshLog() {
-        logView.text = FrameLog.snapshot().takeLast(40).joinToString("\n")
     }
 
     private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_SHORT).show()
@@ -453,38 +427,6 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
     private fun onExportClicked() {
         try { startActivity(FrameLog.exportIntent(this)) } catch (e: Exception) { toast("Export failed: ${e.message}") }
-    }
-
-    private fun onNavTestClicked() {
-        val g = gatt ?: run { toast("Connect to the scooter first"); return }
-        status("Nav test: right turn counting down on the cluster…")
-        FrameLog.add("BLE", "---- nav test start ----")
-        g.sendNavTest()
-    }
-
-    private fun onProbeClicked() {
-        status("Map-channel probe: make sure you're on the cluster's Wi-Fi…")
-        FrameLog.add("WIFI", "---- map channel probe start ----")
-        MapProbe.run(applicationContext, object : MapProbe.Listener {
-            override fun onProbe(text: String) { main.post { status(text) } }
-            override fun onDone() { main.post { status("Probe done. Export the log to share.") } }
-        })
-    }
-
-    private fun onHandshakeClicked() {
-        status("Map handshake: make sure you're on the cluster's Wi-Fi…")
-        FrameLog.add("WIFI", "---- map handshake start ----")
-        MapProbe.handshake(applicationContext, object : MapProbe.Listener {
-            override fun onProbe(text: String) { main.post { status(text) } }
-            override fun onDone() { main.post { status("Handshake done. Export the log.") } }
-        })
-    }
-
-    private fun onImageProbeClicked() {
-        val g = gatt ?: run { toast("Connect to the scooter first"); return }
-        status("Image-channel probe: sending INIT frames…")
-        FrameLog.add("BLE", "---- image-channel INIT probe start ----")
-        g.sendImageInitProbe()
     }
 
     override fun onDestroy() {

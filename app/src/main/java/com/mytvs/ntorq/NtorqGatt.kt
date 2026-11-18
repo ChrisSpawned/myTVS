@@ -28,7 +28,7 @@ import java.util.UUID
  */
 class NtorqGatt(
     private val context: Context,
-    private val listener: Listener,
+    @Volatile var listener: Listener?,
 ) {
     interface Listener {
         fun onStatus(text: String)
@@ -49,6 +49,10 @@ class NtorqGatt(
     private var writeChar: BluetoothGattCharacteristic? = null
     private var mtu = 23
     @Volatile private var latestAvgMileageRaw = -1
+    @Volatile private var latestInstantMileageRaw = -1
+
+    /** Current (instantaneous) fuel economy, raw kmpl from frame 0x16 byte 7; -1 = not yet seen. */
+    fun currentKmplRaw(): Int = latestInstantMileageRaw
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
@@ -314,7 +318,9 @@ class NtorqGatt(
     //  navOnOff on the Ntorq: 0x00 = navigating, 0xFF = stopped.
 
     private fun navTextFrame(text: String): ByteArray {
-        val t = text.take(17).toByteArray(Charsets.UTF_8)
+        // ASCII only: a non-Latin instruction (e.g. Maps in Malayalam) would otherwise
+        // exceed 17 bytes and break the 20-byte frame. The cluster shows no text anyway.
+        val t = sanitize(text).take(17).toByteArray(Charsets.US_ASCII)
         val head = byteArrayOf(0x5B, 0x4F)
         val pad = ByteArray(20 - (head.size + t.size + 1))
         return head + t + pad + byteArrayOf(0xFF.toByte())
@@ -399,6 +405,7 @@ class NtorqGatt(
         FrameLog.add("BLE", "session start (key ${if (txXorKey >= 0) "0x%02X".format(txXorKey) else "raw"}): rider name + 2 s heartbeat")
         writeRaw("rider-name 5B52", customTextFrame(riderName, 0x52))
         main.postDelayed(heartbeat, 50)
+        if (NavBridge.isActive) main.postDelayed({ navStart() }, 1500)
         status("Connected — phone session running (heartbeat every 2 s). Watch the cluster for a phone/battery/signal icon.")
     }
 
@@ -549,6 +556,29 @@ class NtorqGatt(
         }, 17_200)
     }
 
+    // ---- Live navigation API (used by NavBridge) -------------------------
+    /** Switch the cluster to its nav screen (assist-on pair twice, ~2.1 s apart, like the app). */
+    fun navStart() {
+        txXorKey = 0xEA
+        sendAssistOn()
+        main.postDelayed({ sendAssistOn() }, 2100)
+    }
+
+    /**
+     * One nav update: text frame, control frame 400 ms later.
+     * minutesField -> "31m" slot (cluster derives ETA from it);
+     * totalFieldM  -> "15.6km" slot (metres).
+     */
+    fun navPush(instruction: String, distNextM: Int, minutesField: Int, totalFieldM: Int, picto: Int) {
+        sendNavPair(instruction, distNextM.coerceIn(0, 0xFFFF), totalFieldM.coerceIn(0, 0xFFFFFF),
+            minutesField.coerceIn(0, 0xFFFF) * 60L, picto)
+    }
+
+    /** Close the cluster's nav screen (navOnOff = 0x00). */
+    fun navStop() {
+        writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
+    }
+
     private fun handleData(uuid: UUID, value: ByteArray?) {
         if (uuid != NOTIFY || value == null) return
         val hex = NtorqCodec.hex(value)
@@ -556,8 +586,11 @@ class NtorqGatt(
         if (frame != null) {
             // Fuel-economy frame (SpeedOMeter3 candidate, id 0x16): average
             // mileage sits at data byte 6, instantaneous at 7, range at 9..10.
-            if (frame.id == 0x16) latestAvgMileageRaw = frame.u(6)
-            main.post { listener.onFrame(frame, hex) }
+            if (frame.id == 0x16) {
+                latestAvgMileageRaw = frame.u(6)       // AVERAGE_FUEL_ECONOMY (frame byte 9)
+                latestInstantMileageRaw = frame.u(7)   // INSTANTANEOUS_FUEL_ECONOMY (frame byte 10)
+            }
+            main.post { listener?.onFrame(frame, hex) }
         } else {
             FrameLog.add("RX?", hex)
         }
@@ -574,6 +607,6 @@ class NtorqGatt(
 
     private fun status(text: String) {
         FrameLog.add("BLE", text)
-        main.post { listener.onStatus(text) }
+        main.post { listener?.onStatus(text) }
     }
 }

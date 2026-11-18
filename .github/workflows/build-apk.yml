@@ -25,6 +25,9 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Unit tests (Google Maps notification parser)
+        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 

@@ -19,6 +19,10 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
+import android.content.Intent
+import android.provider.Settings
+import androidx.core.app.NotificationManagerCompat
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -37,6 +41,8 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private lateinit var liveView: TextView
     private lateinit var logView: TextView
     private lateinit var connectBtn: Button
+    private lateinit var navStatusView: TextView
+    private lateinit var notifBtn: Button
 
     private var gatt: NtorqGatt? = null
     private var scanning = false
@@ -53,8 +59,23 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        NavBridge.init(this)
         setContentView(buildUi())
         status("Idle. Turn the scooter on, then tap Connect.")
+        // Re-attach to a link that survived while this screen was closed.
+        NavBridge.gatt?.let {
+            gatt = it
+            it.listener = this
+            connectBtn.text = "Disconnect"
+            status("Connected (link kept alive in the background).")
+        }
+        NavBridge.statusListener = { s -> navStatusView.text = s }
+        navStatusView.text = NavBridge.lastStatus
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) { }.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     private fun buildUi(): View {
@@ -100,6 +121,22 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             text = "Nav test"
             setOnClickListener { onNavTestClicked() }
         }
+        notifBtn = Button(this).apply {
+            setOnClickListener {
+                try {
+                    startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                } catch (e: Exception) {
+                    toast("Open Settings → Notifications → Notification access")
+                }
+            }
+        }
+        val kmplBox = CheckBox(this).apply {
+            text = "kmpl in distance slot"
+            isChecked = NavBridge.kmplInDistanceSlot
+            setOnCheckedChangeListener { _, on -> NavBridge.kmplInDistanceSlot = on }
+        }
+        navStatusView = TextView(this).apply { setPadding(0, 8, 0, 8); textSize = 14f; setTypeface(typeface, Typeface.BOLD) }
+        val row4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         fun weighted() = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -109,6 +146,8 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         row2.addView(handshakeBtn, weighted())
         row3.addView(imageBtn, weighted())
         row3.addView(navBtn, weighted())
+        row4.addView(notifBtn, weighted())
+        row4.addView(kmplBox, weighted())
 
         val liveTitle = section("Live frames")
         liveView = mono()
@@ -119,6 +158,8 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         inner.addView(title)
         inner.addView(statusView)
+        inner.addView(navStatusView)
+        inner.addView(row4)
         inner.addView(row)
         inner.addView(row2)
         inner.addView(row3)
@@ -153,6 +194,8 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         if (gatt != null) {
             gatt?.disconnect()
             gatt = null
+            NavBridge.gatt = null
+            RideService.stop(this)
             connectBtn.text = "Connect"
             status("Disconnected.")
             return
@@ -209,7 +252,9 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
     private fun connect(dev: BluetoothDevice) {
         connectBtn.text = "Disconnect"
-        gatt = NtorqGatt(this, this).also { it.connect(dev) }
+        gatt = NtorqGatt(applicationContext, this).also { it.connect(dev) }
+        NavBridge.gatt = gatt
+        RideService.start(this)
     }
 
     override fun onStatus(text: String) {
@@ -283,8 +328,17 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         })
     }
 
+    override fun onResume() {
+        super.onResume()
+        val granted = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
+        notifBtn.text = if (granted) "Maps access ✓" else "Allow Maps access"
+    }
+
     override fun onDestroy() {
-        gatt?.disconnect()
+        // Keep the link alive (RideService) so Google Maps turns still reach the
+        // cluster; just detach this screen. Use Disconnect to end the session.
+        gatt?.listener = null
+        NavBridge.statusListener = null
         super.onDestroy()
     }
 }

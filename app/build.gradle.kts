@@ -11,8 +11,8 @@ android {
         applicationId = "com.mytvs.ntorq"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "0.15.0"
+        versionCode = 18
+        versionName = "0.16.0"
     }
 
     buildTypes {
@@ -35,4 +35,5 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    testImplementation("junit:junit:4.13.2")
 }

@@ -66,4 +66,31 @@ class MapsParserTest {
     @Test fun nothingUsable() {
         assertNull(MapsParser.parse(listOf("", "  ")))
     }
+
+    // Real notification captured on the user's phone (Google Maps, 2026-11-18 15:18).
+    @Test fun realCapture_headSouth_arriveTime() {
+        val now = 15 * 60 + 18
+        val n = MapsParser.parse(listOf("Head south on Zveda Villas Rd", "Arrive 3:20 pm", "•", "Exit navigation"), now)!!
+        assertEquals("Head south on Zveda Villas Rd", n.instruction)
+        assertEquals(Maneuver.STRAIGHT, n.maneuver)
+        assertEquals(2, n.remainingMin)
+        assertNull(n.distNextM)
+    }
+
+    @Test fun realCapture_startingNavigationIsIgnored() {
+        assertNull(MapsParser.parse(listOf("Starting navigation…", "•", "3:18 pm", "Maps"), 15 * 60 + 18))
+    }
+
+    @Test fun arrivalTimeFormats() {
+        assertEquals(62, MapsParser.minutesUntilArrival("Arrive 4:20 pm", 15 * 60 + 18))
+        assertEquals(10, MapsParser.minutesUntilArrival("ETA 00:05", 23 * 60 + 55))
+        assertEquals(30, MapsParser.minutesUntilArrival("Arrive 12:30 am", 0))
+    }
+
+    @Test fun turnWithDistanceAndArrival() {
+        val n = MapsParser.parse(listOf("200 m", "Turn right onto Club Road", "Arrive 3:30 pm", "Exit navigation"), 15 * 60)!!
+        assertEquals(200, n.distNextM)
+        assertEquals(Maneuver.RIGHT, n.maneuver)
+        assertEquals(30, n.remainingMin)
+    }
 }

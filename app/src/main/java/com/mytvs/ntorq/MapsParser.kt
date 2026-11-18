@@ -35,6 +35,9 @@ object MapsParser {
     private val DUR_H = Regex("""(\d+)\s*(?:h|hr|hrs|hour|hours)\b""", RegexOption.IGNORE_CASE)
     private val DUR_M = Regex("""(\d+)\s*(?:min|mins|minute|minutes)\b""", RegexOption.IGNORE_CASE)
     private val SPLIT = Regex("""\s+[·•|–—-]\s+""")
+    private val ARRIVE_AT = Regex("""\b(?:arrive|arriving|arrival|eta)\b\D{0,6}(\d{1,2})[:.](\d{2})\s*([ap])?\.?\s*m?\b""", RegexOption.IGNORE_CASE)
+    /** Notification chrome that is not route information. */
+    private val JUNK = Regex("""^(exit navigation|maps|google maps|•|·|-|\d{1,2}[:.]\d{2}\s*([ap]\.?m\.?)?)$""", RegexOption.IGNORE_CASE)
     private val EXIT_NUM = Regex("""(\d+)\s*(?:st|nd|rd|th)\s+exit""", RegexOption.IGNORE_CASE)
     private val ORDINALS = listOf("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
     private val TURN_WORDS = Regex(
@@ -63,6 +66,27 @@ object MapsParser {
         val m = DUR_M.find(s)?.groupValues?.get(1)?.toIntOrNull()
         if (h == null && m == null) return null
         return (h ?: 0) * 60 + (m ?: 0)
+    }
+
+    /**
+     * "Arrive 3:20 pm" -> minutes from [nowMinOfDay] until then (wraps past midnight).
+     * Newer Google Maps shows only the arrival clock time, not "31 min".
+     */
+    fun minutesUntilArrival(s: String, nowMinOfDay: Int): Int? {
+        val m = ARRIVE_AT.find(s) ?: return null
+        var h = m.groupValues[1].toIntOrNull() ?: return null
+        val min = m.groupValues[2].toIntOrNull() ?: return null
+        when (m.groupValues[3].lowercase()) {
+            "a" -> if (h == 12) h = 0
+            "p" -> if (h != 12) h += 12
+        }
+        if (h !in 0..23 || min !in 0..59) return null
+        return ((h * 60 + min) - nowMinOfDay + 1440) % 1440
+    }
+
+    private fun nowMinOfDay(): Int {
+        val c = java.util.Calendar.getInstance()
+        return c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE)
     }
 
     private fun firstIndex(text: String, vararg words: String): Int =
@@ -119,12 +143,14 @@ object MapsParser {
     }
 
     /** Parse the notification's text fields (in notification order: title first). */
-    fun parse(fields: List<String>): NavInfo? {
-        val clean = fields.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+    fun parse(fields: List<String>, nowMinOfDay: Int = nowMinOfDay()): NavInfo? {
+        val clean = fields.map { it.trim() }.filter { it.isNotEmpty() && !JUNK.matches(it) }.distinct()
         if (clean.isEmpty()) return null
+        if (clean.any { it.contains("starting navigation", ignoreCase = true) }) return null
 
-        val status = clean.firstOrNull { durationMinutes(it) != null && (DUR_M.containsMatchIn(it) || DUR_H.containsMatchIn(it)) }
-        val others = clean.filter { it != status }
+        val status = clean.firstOrNull { durationMinutes(it) != null }
+        val arrival = clean.firstOrNull { it != status && ARRIVE_AT.containsMatchIn(it) }
+        val others = clean.filter { it != status && it != arrival }
 
         var distNext: Int? = null
         var instruction: String? = null
@@ -152,7 +178,7 @@ object MapsParser {
             maneuver = man,
             roundaboutExit = exit,
             distNextM = distNext,
-            remainingMin = status?.let { durationMinutes(it) },
+            remainingMin = status?.let { durationMinutes(it) } ?: arrival?.let { minutesUntilArrival(it, nowMinOfDay) },
             remainingM = status?.let { distanceMeters(it) },
         )
     }

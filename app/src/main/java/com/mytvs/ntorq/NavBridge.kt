@@ -35,6 +35,7 @@ object NavBridge {
 
     /** Called on the main thread for every parsed Maps notification update. */
     fun onMapsUpdate(n: NavInfo) {
+        if (n != info) FrameLog.add("NAV", describe(n) + " | \"${n.instruction}\"")
         info = n
         if (!isActive) {
             isActive = true

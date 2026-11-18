@@ -93,4 +93,24 @@ class MapsParserTest {
         assertEquals(Maneuver.RIGHT, n.maneuver)
         assertEquals(30, n.remainingMin)
     }
+
+    // Real captures from the user's ride (2026-11-18 15:32–15:35).
+    @Test fun realCapture_distanceAndPlaceName() {
+        val n = MapsParser.parse(listOf("190 m · V B Mist", "Arrive 3:33 pm"), 15 * 60 + 32)!!
+        assertEquals(190, n.distNextM)
+        assertEquals("V B Mist", n.instruction)
+        assertEquals(1, n.remainingMin)
+    }
+
+    @Test fun realCapture_turnRightToward() {
+        val n = MapsParser.parse(listOf("290 m · Turn right toward Zveda Villas Rd", "Arrive 3:35 pm"), 15 * 60 + 33)!!
+        assertEquals(290, n.distNextM)
+        assertEquals(Maneuver.RIGHT, n.maneuver)
+        assertEquals(16, MapsParser.picto(n.maneuver))
+    }
+
+    @Test fun realCapture_arriving() {
+        val n = MapsParser.parse(listOf("Arriving", "at V B Mist", "•", "3:33 pm"), 15 * 60 + 33)!!
+        assertEquals(Maneuver.ARRIVE, n.maneuver)
+    }
 }

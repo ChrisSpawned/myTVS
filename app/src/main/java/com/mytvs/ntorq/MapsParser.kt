@@ -41,7 +41,7 @@ object MapsParser {
     private val EXIT_NUM = Regex("""(\d+)\s*(?:st|nd|rd|th)\s+exit""", RegexOption.IGNORE_CASE)
     private val ORDINALS = listOf("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth")
     private val TURN_WORDS = Regex(
-        """\b(turn|left|right|slight|sharp|keep|stay|bear|u-?turn|roundabout|rotary|continue|head|merge|straight|destination|arrive|exit|ramp|fork)\b""",
+        """\b(turn|left|right|slight|sharp|keep|stay|bear|u-?turn|roundabout|rotary|continue|head|merge|straight|destination|arrive|arriving|exit|ramp|fork)\b""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -167,7 +167,9 @@ object MapsParser {
             }
         }
         if (instruction == null) {
-            instruction = others.filter { DIST.matchEntire(it) == null }.maxByOrNull { it.length }
+            // No turn words (e.g. "190 m · V B Mist"): use the longest non-distance part.
+            instruction = others.flatMap { it.split(SPLIT) }.map { it.trim() }
+                .filter { it.isNotEmpty() && DIST.matchEntire(it) == null }.maxByOrNull { it.length }
         }
         if (distNext == null && instruction == null) return null
 

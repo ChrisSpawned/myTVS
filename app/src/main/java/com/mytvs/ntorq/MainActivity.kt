@@ -53,6 +53,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private lateinit var pill: TextView
     private lateinit var kmplNow: TextView
     private lateinit var kmplAvg: TextView
+    private lateinit var kmplLabel: TextView
     private lateinit var navArrow: TextView
     private lateinit var navDist: TextView
     private lateinit var navInstr: TextView
@@ -174,15 +175,17 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
 
         // Fuel economy
         val fuel = cardBox()
-        fuel.addView(label("Fuel economy · now"))
+        kmplLabel = label("Fuel economy")
+        fuel.addView(kmplLabel)
         val nowRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.BOTTOM }
         kmplNow = text(72f, accent, true, "--").apply { includeFontPadding = false }
         nowRow.addView(kmplNow)
         nowRow.addView(text(20f, muted, true, "  kmpl").apply { setPadding(0, 0, 0, dp(12)) })
         fuel.addView(nowRow, lp(4))
-        kmplAvg = text(15f, muted, false, "Average —")
+        kmplAvg = text(15f, muted, false, "Speed —")
         fuel.addView(kmplAvg, lp(2))
-        fuel.addView(text(12f, muted, false, "During navigation this shows on the cluster in the km slot."), lp(10))
+        fuel.addView(text(12f, muted, false, "During navigation this shows on the cluster in the km slot. " +
+            "Your cluster reports average economy only — it doesn't send a live figure."), lp(10))
         col.addView(fuel, lp(20))
 
         // Navigation
@@ -301,10 +304,12 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         connectBtn.setTextColor(if (g == null) bg else fg)
 
         // Fuel
-        val now = g?.currentKmplRaw() ?: -1
+        val live = g?.currentKmplRaw() ?: -1
         val avg = g?.averageKmplRaw() ?: -1
-        kmplNow.text = if (now >= 0) "$now" else "--"
-        kmplAvg.text = if (avg >= 0) "Average  $avg kmpl" else "Average —"
+        val shown = if (live > 0) live else avg
+        kmplNow.text = if (shown >= 0) "$shown" else "--"
+        kmplLabel.text = (if (live > 0) "Fuel economy · live" else "Fuel economy · average").uppercase()
+        kmplAvg.text = if (g != null && g.isLive) "Speed  ${g.speedKmh} km/h" else "Speed —"
 
         // Navigation
         val n = NavBridge.current
@@ -312,7 +317,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             navChip.visibility = View.VISIBLE
             navArrow.text = arrowFor(n.maneuver)
             navArrow.setTextColor(accent)
-            navDist.text = fmtDist(n.distNextM)
+            navDist.text = fmtDist(NavBridge.shownDistM ?: n.distNextM)
             navInstr.text = n.instruction.ifBlank { "Follow the route" }
             navMeta.text = listOfNotNull(
                 n.remainingMin?.let { "$it min left" },

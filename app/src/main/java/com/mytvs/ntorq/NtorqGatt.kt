@@ -57,6 +57,10 @@ class NtorqGatt(
     /** Average fuel economy, raw kmpl from frame 0x16 byte 6; -1 = not yet seen. */
     fun averageKmplRaw(): Int = latestAvgMileageRaw
 
+    /** Road speed in km/h from frame 0x10 byte 0 (confirmed on a ride: 0–48 km/h). */
+    @Volatile var speedKmh: Int = 0
+        private set
+
     /** True once the cluster is streaming telemetry to us. */
     @Volatile var isLive = false
         private set
@@ -451,7 +455,7 @@ class NtorqGatt(
 
     /**
      * BlePacketsProvider.sendNtorqMobileData for U_577_PREMIUM (20 bytes):
-     *   5B 4A | sig<<4|bat | overSpeed(FF=off) | temp | 00 | hour12 | min | sec | am(1)/pm(0) |
+     *   5B 4A | sig<<4|bat | overSpeed(FF=off) | temp | 00 | hour12 | min | sec | am(0)/pm(1) |
      *   missedCalls | netType(4=LTE) | day | month | yy | 00 | voiceAssist(0) | 00 | callState | FF
      * The packed byte is hex2decimal("$signal$battery"), i.e. nibbles.
      */
@@ -459,7 +463,9 @@ class NtorqGatt(
         val c = java.util.Calendar.getInstance()
         val h24 = c.get(java.util.Calendar.HOUR_OF_DAY)
         val h12 = if (h24 % 12 == 0) 12 else h24 % 12          // app uses "hh" (01..12)
-        val am = if (c.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) 1 else 0
+        // From the raw bytecode of sendNtorqMobileData: AM_PM == AM -> 0, PM -> 1.
+        // (The readable decompile showed it inverted; that sent "3 PM" as 3 AM.)
+        val am = if (c.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) 0 else 1
         val packed = (signalLevel() shl 4) or iceBatteryLevel(batteryPct())
         return byteArrayOf(
             0x5B, 0x4A,
@@ -470,7 +476,7 @@ class NtorqGatt(
             h12.toByte(),
             c.get(java.util.Calendar.MINUTE).toByte(),
             c.get(java.util.Calendar.SECOND).toByte(),
-            am.toByte(),
+            am.toByte(),                 // 0 = AM, 1 = PM
             0,                           // missed calls
             4,                           // network type: LTE
             c.get(java.util.Calendar.DAY_OF_MONTH).toByte(),
@@ -582,6 +588,13 @@ class NtorqGatt(
             minutesField.coerceIn(0, 0xFFFF) * 60L, picto)
     }
 
+    /** Control frame only (arrow + distance + bottom row) — for fast distance updates between text frames. */
+    fun navPushControl(instruction: String, distNextM: Int, minutesField: Int, totalFieldM: Int, picto: Int) {
+        writeRaw("nav-ctrl 5A4E d=$distNextM picto=$picto",
+            navControlFrame(distNextM.coerceIn(0, 0xFFFF), totalFieldM.coerceIn(0, 0xFFFFFF),
+                minutesField.coerceIn(0, 0xFFFF) * 60L, picto, twoLines = instruction.length > 17, stopped = false))
+    }
+
     /** Close the cluster's nav screen (navOnOff = 0x00). */
     fun navStop() {
         writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
@@ -595,6 +608,7 @@ class NtorqGatt(
             // Fuel-economy frame (SpeedOMeter3 candidate, id 0x16): average
             // mileage sits at data byte 6, instantaneous at 7, range at 9..10.
             isLive = true
+            if (frame.id == 0x10) speedKmh = frame.u(0)
             if (frame.id == 0x16) {
                 latestAvgMileageRaw = frame.u(6)       // AVERAGE_FUEL_ECONOMY (frame byte 9)
                 latestInstantMileageRaw = frame.u(7)   // INSTANTANEOUS_FUEL_ECONOMY (frame byte 10)

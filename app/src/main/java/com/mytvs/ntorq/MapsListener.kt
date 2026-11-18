@@ -46,7 +46,7 @@ class MapsListener : NotificationListenerService() {
             FrameLog.add("MAPS", "cat=${n.category} ongoing=${sbn.isOngoing}: $dump")
         }
         val info = MapsParser.parse(texts) ?: return
-        if (info.distNextM == null && info.remainingMin == null) return   // not a nav notification
+        if (info.distNextM == null && info.remainingMin == null && info.maneuver != Maneuver.ARRIVE) return
         navKey = sbn.key
         NavBridge.onMapsUpdate(info)
     }

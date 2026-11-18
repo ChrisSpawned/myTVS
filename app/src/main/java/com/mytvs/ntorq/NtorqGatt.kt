@@ -20,7 +20,7 @@ import java.util.UUID
  * Connects, lets Android bond, subscribes to notifications and decodes telemetry.
  * Like the official app, it then runs a phone session: rider name once, and a
  * phone-status heartbeat (5B 4A) every 2 s. All writes are 20-byte frames,
- * XOR-0xEA encrypted (encryptDataU577Premium), sent one at a time.
+ * sent raw (confirmed on the scooter), one at a time.
  *
  * Writes are limited to display/status frames the official app sends (phone
  * status, rider name, navigation text/arrows). It never sends vehicle-control or
@@ -158,8 +158,10 @@ class NtorqGatt(
      * on EVERY write: keep bytes [0] and [1], XOR bytes [2 .. len-2] with
      * getKeyByteArrayForNtorqU577 (= 0xEA at every position), keep the trailing 0xFF.
      * (U_577_BASE, type 37, sends raw.) -1 = raw.
+     * CONFIRMED ON THE SCOOTER (v0.12.0 test, 2026-11-18): the cluster renders
+     * navigation from RAW frames (pass 2); the 0xEA pass was ignored. So raw it is.
      */
-    var txXorKey: Int = 0xEA
+    var txXorKey: Int = -1
     private fun encrypt(frame: ByteArray): ByteArray {
         if (txXorKey < 0) return frame
         val out = frame.copyOf()
@@ -492,18 +494,14 @@ class NtorqGatt(
         }, t0 + 20_200)
     }
 
-    /**
-     * Pass 1 uses the encoding the app uses for your bike (U577 Premium, XOR 0xEA).
-     * Pass 2 is a raw fallback (U577 Base). The heartbeat follows the pass's encoding.
-     */
+    /** Nav test: one ~22 s replay, raw encoding (confirmed working on this cluster). */
     fun sendNavTest() {
         if (!sessionOn) startSession()
-        navPass(0, 0xEA, "U577 Premium (XOR 0xEA)", 1, 2)
-        navPass(23_000, -1, "U577 Base (raw)", 2, 2)
+        navPass(0, -1, "raw", 1, 1)
         main.postDelayed({
-            txXorKey = 0xEA
-            status("Nav test done. Did pass 1 or pass 2 change the cluster? Also: any phone/battery icon or time change since connecting?")
-        }, 45_000)
+            txXorKey = -1
+            status("Nav test done. Did the arrow, \"Turn left onto Cl\" and the kmpl line show?")
+        }, 22_000)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

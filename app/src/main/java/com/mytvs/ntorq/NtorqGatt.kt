@@ -15,15 +15,16 @@ import android.os.Looper
 import java.util.UUID
 
 /**
- * BLE link to the Ntorq 150 TFT cluster.
+ * BLE link to the Ntorq 150 TFT cluster (official-app type U_577_PREMIUM, id 38).
  *
- * It connects, lets Android bond (the cluster requires pairing), subscribes to the
- * notify characteristic, and reports decoded frames. The cluster drops a silent
- * link after ~15 s, so this reconnects automatically.
+ * Connects, lets Android bond, subscribes to notifications and decodes telemetry.
+ * Like the official app, it then runs a phone session: rider name once, and a
+ * phone-status heartbeat (5B 4A) every 2 s. All writes are 20-byte frames,
+ * XOR-0xEA encrypted (encryptDataU577Premium), sent one at a time.
  *
- * Writes are limited to the cluster's own documented *display-data* frames (the
- * image-transfer channel), used to probe whether this cluster accepts a pushed
- * image. It never sends guessed vehicle-control commands.
+ * Writes are limited to display/status frames the official app sends (phone
+ * status, rider name, navigation text/arrows). It never sends vehicle-control or
+ * vehicle-settings commands, and never the keyless-entry/unlock handshake.
  */
 class NtorqGatt(
     private val context: Context,
@@ -60,6 +61,7 @@ class NtorqGatt(
     @SuppressLint("MissingPermission")
     fun disconnect() {
         wantConnected = false
+        stopSession()
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -87,6 +89,7 @@ class NtorqGatt(
                 status("Connected — discovering services…")
                 main.post { g.discoverServices() }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                main.post { stopSession() }
                 reconnectSoon()
             }
         }
@@ -123,10 +126,14 @@ class NtorqGatt(
         override fun onMtuChanged(g: BluetoothGatt, mtuValue: Int, st: Int) {
             mtu = mtuValue
             FrameLog.add("BLE", "MTU = $mtuValue (status $st)")
+            // The official app starts its phone session right after the MTU
+            // exchange (onConnectedPeripheral -> setMTU -> initializeDeviceServices).
+            main.postDelayed({ startSession() }, 500)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, st: Int) {
-            FrameLog.add("BLE", "write result status=$st on ${ch.uuid.toString().substring(4, 8)}")
+            if (st != 0) FrameLog.add("BLE", "write result status=$st on ${ch.uuid.toString().substring(4, 8)}")
+            onWriteDone()
         }
 
         @Deprecated("Deprecated in Java")
@@ -145,20 +152,14 @@ class NtorqGatt(
     }
 
     /**
-     * Raw write to the cluster's SR characteristic. Used ONLY for the cluster's
-     * own documented *display-data* frames (image transfer), never for guessed
-     * vehicle-control commands. Image frames are sent raw (no XOR, no checksum),
-     * exactly as the official app does with isChecksumNeeded=false.
+     * Outgoing encryption. The official app's bike type for this scooter is
+     * vehicleTypeId 38 = BikeType.U_577_PREMIUM (Ntorq 150 TFT). For that type
+     * BleEngine.writeCharacteristicToCentral runs BluetoothUtil.encryptDataU577Premium
+     * on EVERY write: keep bytes [0] and [1], XOR bytes [2 .. len-2] with
+     * getKeyByteArrayForNtorqU577 (= 0xEA at every position), keep the trailing 0xFF.
+     * (U_577_BASE, type 37, sends raw.) -1 = raw.
      */
-    @SuppressLint("MissingPermission")
-    /**
-     * Outgoing encryption, matching the app's BluetoothUtil.encryptData for the
-     * default (non-listed) bike types: keep the start byte and ID, XOR the body
-     * (indices 2 .. len-2) with the key, leave the trailing 0xFF. The W626 Ntorq
-     * is an older variant not in the no-encrypt list, so its writes are encrypted.
-     * Key 0xEB = getKeyByteArray (-21).
-     */
-    var txXorKey: Int = 0xEB
+    var txXorKey: Int = 0xEA
     private fun encrypt(frame: ByteArray): ByteArray {
         if (txXorKey < 0) return frame
         val out = frame.copyOf()
@@ -166,21 +167,56 @@ class NtorqGatt(
         return out
     }
 
+    // ---- Write queue ------------------------------------------------------
+    // Android allows one GATT write in flight at a time. The official app pushes
+    // every write through a command queue (BluetoothPeripheral.enqueue) and only
+    // starts the next one when the previous write completes. With the 2-second
+    // heartbeat running underneath navigation we must do the same, or writes
+    // collide and are silently dropped.
+    private class PendingWrite(val label: String, val bytes: ByteArray)
+    private val queue = ArrayDeque<PendingWrite>()
+    private var writeBusy = false
+    private var busySince = 0L
+
+    /** Queue a frame for the cluster. Frames are encrypted at send time. */
     fun writeRaw(label: String, bytes: ByteArray): Boolean {
+        if (bytes.size != 20) {
+            // BluetoothPeripheral.writeCharacteristicNtorq refuses any frame that
+            // is not exactly 20 bytes, so the official app never sends one.
+            FrameLog.add("BLE", "refused $label: ${bytes.size} bytes (cluster frames are 20)")
+            return false
+        }
+        main.post {
+            queue.addLast(PendingWrite(label, bytes))
+            pump()
+        }
+        return true
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun pump() {
+        if (writeBusy && System.currentTimeMillis() - busySince > 1500) {
+            FrameLog.add("BLE", "write timed out — continuing")
+            writeBusy = false
+        }
+        if (writeBusy) return
+        val next = queue.removeFirstOrNull() ?: return
         val g = gatt
         val ch = writeChar
         if (g == null || ch == null) {
-            FrameLog.add("BLE", "write skipped ($label): not connected / no write char")
-            return false
+            FrameLog.add("BLE", "write skipped (${next.label}): not connected")
+            queue.clear()
+            return
         }
-        // Prefer write-with-response when supported, so we get an ACK status back.
-        val canResp = (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0
-        val type = if (canResp) BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        else BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        val wire = encrypt(bytes)
-        FrameLog.add("TX-BLE", "$label: ${NtorqCodec.hex(bytes)}" +
-            if (txXorKey >= 0) " -> enc ${NtorqCodec.hex(wire)}" else "")
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        // Same rule as BleEngine for U577: use the characteristic's own write type —
+        // write-without-response if that's its default, otherwise with response.
+        val noResp = (ch.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) == 0
+        val type = if (noResp) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        val wire = encrypt(next.bytes)
+        FrameLog.add("TX-BLE", "${next.label}: ${NtorqCodec.hex(next.bytes)}" +
+            if (txXorKey >= 0) " -> enc ${NtorqCodec.hex(wire)}" else " (raw)")
+        val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             g.writeCharacteristic(ch, wire, type) == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION") run {
@@ -188,6 +224,26 @@ class NtorqGatt(
                 ch.value = wire
                 g.writeCharacteristic(ch)
             }
+        }
+        if (!ok) {
+            FrameLog.add("BLE", "write REJECTED by Android stack: ${next.label} — retrying")
+            queue.addFirst(next)
+            main.postDelayed({ pump() }, 150)
+            return
+        }
+        if (noResp) {
+            main.postDelayed({ pump() }, 30)
+        } else {
+            writeBusy = true
+            busySince = System.currentTimeMillis()
+            main.postDelayed({ pump() }, 1600)
+        }
+    }
+
+    private fun onWriteDone() {
+        main.post {
+            writeBusy = false
+            pump()
         }
     }
 
@@ -269,105 +325,185 @@ class NtorqGatt(
             byteArrayOf(0xFF.toByte())
     }
 
-    /**
-     * Second navigation text line (the cluster's road-name slot), reconstructed
-     * from BleNavigationSendData.sendNavigationControl2. A 33-byte frame:
-     *   5A 49 | text(≤22 UTF-8) | pad 0x00 | destArrived | 00 00 00 | FF
-     * We put the live mileage here instead of the road name.
-     */
-    private fun navControl2Frame(text: String, destArrived: Boolean): ByteArray {
-        val t = (if (text.length > 23) text.substring(0, 22) else text).toByteArray(Charsets.UTF_8)
-        val head = byteArrayOf(0x5A, 0x49) + t
-        val tail = byteArrayOf(if (destArrived) 1 else 0, 0, 0, 0, 0xFF.toByte())
-        val total = head.size + tail.size
-        val pad = ByteArray(if (total <= 33) 33 - total else 1)
-        return head + pad + tail
-    }
-
-    /**
-     * Location / address frame, from BluetoothUtil.createCurrentLocationArray:
-     *   5B 5C | text(≤17 UTF-8) | pad 0x00 | FF
-     * The app sends this when navigation starts; it's the most likely trigger
-     * that switches the cluster into its navigation screen.
-     */
-    private fun navLocationFrame(text: String): ByteArray {
-        val t = text.take(17).toByteArray(Charsets.UTF_8)
-        val head = byteArrayOf(0x5B, 0x5C)
-        val pad = ByteArray(20 - (head.size + t.size + 1))
-        return head + t + pad + byteArrayOf(0xFF.toByte())
-    }
-
     private fun sanitize(s: String): String =
         s.map { c -> if (c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == ' ') c else 'X' }.joinToString("")
 
     /**
-     * Navigation-assist-ON frame (createNavigationAssistArray, dataId 0x4C):
+     * Navigation-assist-ON frame (BluetoothUtil.createNavigationAssistArray, dataId 0x4C):
      *   5B 4C 4E 41 | text(≤15 alnum) | pad | FF
-     * This is the command that switches the cluster to its navigation screen.
      */
     private fun navAssistFrame(text: String): ByteArray {
-        val t = sanitize(text).take(15).toByteArray(Charsets.UTF_8)
+        val t = sanitize(text).take(15).trim().toByteArray(Charsets.UTF_8)
         val head = byteArrayOf(0x5B, 0x4C, 0x4E, 0x41)
         val pad = ByteArray(20 - (head.size + t.size + 1))
         return head + t + pad + byteArrayOf(0xFF.toByte())
     }
 
-    /** Custom text frame (createMobileToClusterArray): 5B <dataId> | text(≤17) | pad | FF */
+    /**
+     * Custom text frame (BluetoothUtil.createMobileToClusterArray): 5B <dataId> | text(≤17) | pad | FF.
+     * dataId 0x63 = custom text line two, 0x4C = line one, 0x52 = rider name.
+     */
     private fun customTextFrame(text: String, dataId: Int): ByteArray {
-        val t = sanitize(text).take(17).toByteArray(Charsets.UTF_8)
+        val t = sanitize(text).take(17).trim().toByteArray(Charsets.UTF_8)
         val head = byteArrayOf(0x5B, dataId.toByte())
         val pad = ByteArray(20 - (head.size + t.size + 1))
         return head + t + pad + byteArrayOf(0xFF.toByte())
     }
 
-    /** The app's periodic nav keepalive: sendNavAssistOn("NAVIGATION","ASSIST ON"). */
-    private fun sendAssistOn() {
+    // ---- Phone session (what the official app does on every connect) ------
+    // BaseBleConnectHelperService.initializeDeviceServices():
+    //   sendInitialDataPacket()  -> NtorqBleHelper: sendRiderName (5B 52 <name>)
+    //   startSendingCyclicData() -> every 2000 ms: NtorqMobileToCluster.sendMobileData
+    //                               = BlePacketsProvider.sendNtorqMobileData (5B 4A …)
+    // Your own logcat shows that 2.000 s write beat on this scooter. We never sent it.
+    // NOT copied: the vehicle-settings sync (sendVehicleControl) — that's vehicle config.
+
+    var riderName = "Rider"
+    private var sessionOn = false
+    private val heartbeat = object : Runnable {
+        override fun run() {
+            if (!sessionOn) return
+            writeRaw("heartbeat 5B4A", mobileDataFrame())
+            main.postDelayed(this, 2000)
+        }
+    }
+
+    private fun startSession() {
+        if (sessionOn) return
+        sessionOn = true
+        FrameLog.add("BLE", "session start (key ${if (txXorKey >= 0) "0x%02X".format(txXorKey) else "raw"}): rider name + 2 s heartbeat")
+        writeRaw("rider-name 5B52", customTextFrame(riderName, 0x52))
+        main.postDelayed(heartbeat, 50)
+        status("Connected — phone session running (heartbeat every 2 s). Watch the cluster for a phone/battery/signal icon.")
+    }
+
+    private fun stopSession() {
+        sessionOn = false
+        main.removeCallbacks(heartbeat)
+        queue.clear()
+        writeBusy = false
+    }
+
+    /** Phone battery % (no permission needed). */
+    private fun batteryPct(): Int = try {
+        val i = context.registerReceiver(null, android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED))
+        val level = i?.getIntExtra(android.os.BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = i?.getIntExtra(android.os.BatteryManager.EXTRA_SCALE, 100) ?: 100
+        if (level >= 0 && scale > 0) level * 100 / scale else 80
+    } catch (e: Exception) { 80 }
+
+    /** BluetoothUtil.getIceBatteryLevel: % -> 0..5 bars. */
+    private fun iceBatteryLevel(p: Int): Int = when {
+        p < 10 -> 0
+        p < 20 -> 1
+        p < 40 -> 2
+        p < 60 -> 3
+        p < 80 -> 4
+        p <= 100 -> 5
+        else -> 0
+    }
+
+    /** Signal level 0..4 (TelephonyManager.signalStrength.level, as the app uses). */
+    private fun signalLevel(): Int = try {
+        val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) (tm.signalStrength?.level ?: 4).coerceIn(0, 4) else 4
+    } catch (e: Exception) { 4 }
+
+    /**
+     * BlePacketsProvider.sendNtorqMobileData for U_577_PREMIUM (20 bytes):
+     *   5B 4A | sig<<4|bat | overSpeed(FF=off) | temp | 00 | hour12 | min | sec | am(1)/pm(0) |
+     *   missedCalls | netType(4=LTE) | day | month | yy | 00 | voiceAssist(0) | 00 | callState | FF
+     * The packed byte is hex2decimal("$signal$battery"), i.e. nibbles.
+     */
+    private fun mobileDataFrame(): ByteArray {
+        val c = java.util.Calendar.getInstance()
+        val h24 = c.get(java.util.Calendar.HOUR_OF_DAY)
+        val h12 = if (h24 % 12 == 0) 12 else h24 % 12          // app uses "hh" (01..12)
+        val am = if (c.get(java.util.Calendar.AM_PM) == java.util.Calendar.AM) 1 else 0
+        val packed = (signalLevel() shl 4) or iceBatteryLevel(batteryPct())
+        return byteArrayOf(
+            0x5B, 0x4A,
+            packed.toByte(),
+            0xFF.toByte(),               // over-speed alert off
+            0,                           // temperature (app sends 0 until weather loads)
+            0,
+            h12.toByte(),
+            c.get(java.util.Calendar.MINUTE).toByte(),
+            c.get(java.util.Calendar.SECOND).toByte(),
+            am.toByte(),
+            0,                           // missed calls
+            4,                           // network type: LTE
+            c.get(java.util.Calendar.DAY_OF_MONTH).toByte(),
+            (c.get(java.util.Calendar.MONTH) + 1).toByte(),
+            (c.get(java.util.Calendar.YEAR) % 100).toByte(),
+            0,
+            0,                           // voice-assist status (non-LCD cluster)
+            0,
+            0,                           // call state: idle
+            0xFF.toByte(),
+        )
+    }
+
+    // ---- Navigation, replicating the official app's on-air cadence ----------
+    // From your official-app logcat (navlog2): assist-on pairs ~2.1 s apart until
+    // route data flows, then a nav pair every ~1 s (text, +400 ms control), with
+    // the 2 s heartbeat running underneath the whole time.
+
+    private fun sendAssistOn(line2: String = "ASSIST ON") {
         writeRaw("assist-on 5B4C", navAssistFrame("NAVIGATION"))
-        main.postDelayed({ writeRaw("assist-text 5B63", customTextFrame("ASSIST ON", 0x63)) }, 350)
+        main.postDelayed({ writeRaw("line-two 5B63 \"$line2\"", customTextFrame(line2, 0x63)) }, 400)
     }
 
-    private fun sendNavStep(line1: String, line2: String, distNextM: Int, totalDistM: Int, timeSec: Long, picto: Int) {
-        writeRaw("nav-L1 \"$line1\"", navTextFrame(line1))
+    /** BleEngine.sendNavigationData: pair.second (text 5B4F) first, then pair.first (control 5A4E) 400 ms later. */
+    private fun sendNavPair(instruction: String, distNextM: Int, totalDistM: Int, etaSec: Long, picto: Int) {
+        writeRaw("nav-text 5B4F \"${instruction.take(17)}\"", navTextFrame(instruction))
         main.postDelayed({
-            if (mtu - 3 >= 33) writeRaw("nav-L2 \"$line2\"", navControl2Frame(line2, false))
-            else FrameLog.add("BLE", "nav-L2 skipped: MTU $mtu too small for the 33-byte line-2 frame")
-        }, 300)
-        main.postDelayed({
-            writeRaw("nav-ctrl d=$distNextM picto=$picto", navControlFrame(distNextM, totalDistM, timeSec, picto, twoLines = false, stopped = false))
-        }, 500)
+            writeRaw("nav-ctrl 5A4E d=$distNextM picto=$picto",
+                navControlFrame(distNextM, totalDistM, etaSec, picto, twoLines = instruction.length > 17, stopped = false))
+        }, 400)
     }
 
     /**
-     * Fake a short live turn-by-turn so we can see whether the cluster switches
-     * to a navigation screen. Line 1 = the turn, line 2 = the cluster's own live
-     * average mileage (decoded from telemetry). Ends with a nav-stopped frame.
+     * One ~22 s pass that replays exactly what the official app sent when nav
+     * worked on your cluster: "Turn left onto Club Road", pictogram 0, 15.6 km,
+     * 30 min, distance counting down — plus our mileage on line two halfway.
      */
-    /**
-     * Encoding sweep: send the same nav burst under each candidate write-encoding
-     * (raw, XOR 0xEA, XOR 0xEB) in sequence, so we can see which — if any — the
-     * cluster reacts to. Each phase lasts ~7 s. Watch the cluster and note the phase.
-     */
-    fun sendNavTest(picto: Int = 0) {
-        val phases = listOf(-1 to "RAW (no encryption)", 0xEA to "XOR 0xEA", 0xEB to "XOR 0xEB")
-        phases.forEachIndexed { p, (key, name) ->
-            main.postDelayed({
-                txXorKey = key
-                FrameLog.add("BLE", "==== PHASE ${p + 1}/3: $name ====")
-                status("Nav sweep ${p + 1}/3: $name — watch the cluster")
-                val m = latestAvgMileageRaw
-                val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
-                sendAssistOn()
-                main.postDelayed({ sendNavStep("Turn left", line2, 120, 15600, 1800L, picto) }, 800)
-                main.postDelayed({ sendAssistOn() }, 3000)
-                main.postDelayed({ sendNavStep("Turn left", line2, 60, 15600, 1800L, picto) }, 3800)
-                main.postDelayed({ sendNavStep("Turn left", line2, 20, 15600, 1800L, picto) }, 5600)
-            }, p * 7000L)
+    private fun navPass(t0: Long, key: Int, name: String, n: Int, of: Int) {
+        val instruction = "Turn left onto Club Road"
+        main.postDelayed({
+            txXorKey = key
+            FrameLog.add("BLE", "==== PASS $n/$of: $name ====")
+            status("Nav pass $n/$of ($name) — watch the cluster")
+            writeRaw("rider-name 5B52", customTextFrame(riderName, 0x52))
+        }, t0)
+        main.postDelayed({ sendAssistOn() }, t0 + 500)
+        main.postDelayed({ sendAssistOn() }, t0 + 2600)
+        for (i in 0 until 15) {
+            val dist = 300 - i * 20
+            main.postDelayed({ sendNavPair(instruction, dist, 15600 - i * 20, 1800L - i, 0) }, t0 + 4700 + i * 1000L)
         }
         main.postDelayed({
-            txXorKey = -1
-            writeRaw("nav-stop", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
-            status("Sweep done — which phase (1 RAW / 2 EA / 3 EB), if any, changed the cluster?")
-        }, phases.size * 7000L + 1000L)
+            val m = latestAvgMileageRaw
+            val line2 = if (m >= 0) "$m kmpl" else "-- kmpl"
+            writeRaw("line-two 5B63 \"$line2\"", customTextFrame(line2, 0x63))
+        }, t0 + 12_300)
+        main.postDelayed({
+            writeRaw("nav-stop 5A4E", navControlFrame(0, 0, 0, 0, twoLines = false, stopped = true))
+        }, t0 + 20_200)
+    }
+
+    /**
+     * Pass 1 uses the encoding the app uses for your bike (U577 Premium, XOR 0xEA).
+     * Pass 2 is a raw fallback (U577 Base). The heartbeat follows the pass's encoding.
+     */
+    fun sendNavTest() {
+        if (!sessionOn) startSession()
+        navPass(0, 0xEA, "U577 Premium (XOR 0xEA)", 1, 2)
+        navPass(23_000, -1, "U577 Base (raw)", 2, 2)
+        main.postDelayed({
+            txXorKey = 0xEA
+            status("Nav test done. Did pass 1 or pass 2 change the cluster? Also: any phone/battery icon or time change since connecting?")
+        }, 45_000)
     }
 
     private fun handleData(uuid: UUID, value: ByteArray?) {

@@ -11,7 +11,7 @@ import java.util.Locale
 
 /** Timestamped, in-memory + on-disk log of everything on the link, exportable. */
 object FrameLog {
-    private const val MAX_LINES = 4000
+    private const val MAX_LINES = 20000
     private val lines = ArrayDeque<String>()
     private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
 

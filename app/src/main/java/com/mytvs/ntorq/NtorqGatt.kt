@@ -183,7 +183,7 @@ class NtorqGatt(
     // starts the next one when the previous write completes. With the 2-second
     // heartbeat running underneath navigation we must do the same, or writes
     // collide and are silently dropped.
-    private class PendingWrite(val label: String, val bytes: ByteArray, val key: Int?)
+    private class PendingWrite(val label: String, val bytes: ByteArray, val key: Int?) { var tries = 0 }
     private val queue = ArrayDeque<PendingWrite>()
     private var writeBusy = false
     private var busySince = 0L
@@ -197,6 +197,14 @@ class NtorqGatt(
             return false
         }
         main.post {
+            if (gatt == null || writeChar == null || !sessionOn) return@post   // link down: drop, don't queue
+            // Nav frames are snapshots — only the newest one matters. Replace any queued
+            // frame of the same kind so a slow link never builds a backlog of stale ones.
+            if (label.startsWith("nav-")) {
+                val kind = label.substringBefore(' ')
+                queue.removeAll { it.label.substringBefore(' ') == kind }
+            }
+            while (queue.size >= 16) queue.removeFirst()
             queue.addLast(PendingWrite(label, bytes, key))
             pump()
         }
@@ -238,9 +246,14 @@ class NtorqGatt(
             }
         }
         if (!ok) {
-            FrameLog.add("BLE", "write REJECTED by Android stack: ${next.label} — retrying")
-            queue.addFirst(next)
-            main.postDelayed({ pump() }, 150)
+            next.tries++
+            if (!sessionOn || next.tries >= 3) {
+                FrameLog.add("BLE", "write REJECTED by Android stack: ${next.label} — dropped")
+            } else {
+                FrameLog.add("BLE", "write REJECTED by Android stack: ${next.label} — retry ${next.tries}")
+                queue.addFirst(next)
+            }
+            main.postDelayed({ pump() }, 250)
             return
         }
         if (noResp) {
@@ -343,6 +356,8 @@ class NtorqGatt(
 
     var riderName = "Rider"
     private var sessionOn = false
+    /** True while the phone session (heartbeat) is running on a live link. */
+    val isSessionOn: Boolean get() = sessionOn
     private val heartbeat = object : Runnable {
         override fun run() {
             if (!sessionOn) return

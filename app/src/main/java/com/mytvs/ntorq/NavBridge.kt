@@ -28,6 +28,7 @@ object NavBridge {
     private var estDistM: Double? = null
     private var estAt = 0L
     private var stepKey = ""
+    private var lastMapsDist: Int? = null
     private var tickCount = 0
     /** Distance currently shown on the cluster (for the dashboard). */
     val shownDistM: Int? get() = estDistM?.toInt()
@@ -45,11 +46,19 @@ object NavBridge {
     fun onMapsUpdate(n: NavInfo) {
         if (n != info) FrameLog.add("NAV", describe(n) + " | \"${n.instruction}\"")
         val key = n.maneuver.name + "|" + n.instruction
+        val newStep = key != stepKey
         if (n.distNextM != null) {
-            estDistM = n.distNextM.toDouble()
-            estAt = System.currentTimeMillis()
-        } else if (key != stepKey) {
+            // Google Maps re-posts the same notification ("280 m") every few seconds.
+            // Re-anchoring on those repeats threw the countdown back to a stale value,
+            // so only a genuinely new distance (or a new turn) resets the estimate.
+            if (newStep || n.distNextM != lastMapsDist) {
+                estDistM = n.distNextM.toDouble()
+                estAt = System.currentTimeMillis()
+            }
+            lastMapsDist = n.distNextM
+        } else if (newStep) {
             estDistM = null      // new step and Maps gave no distance: unknown
+            lastMapsDist = null
         }
         stepKey = key
         info = n
@@ -70,6 +79,7 @@ object NavBridge {
         gatt?.navStop()
         info = null
         estDistM = null
+        lastMapsDist = null
         stepKey = ""
         FrameLog.add("NAV", "Google Maps navigation ended — closing cluster nav screen")
         status("Navigation ended.")
@@ -86,11 +96,15 @@ object NavBridge {
     private fun push() {
         val g = gatt ?: return
         val n = info ?: return
-        // Dead-reckon the distance with road speed from the cluster.
         val now = System.currentTimeMillis()
+        if (!g.isSessionOn) { estAt = now; return }   // link down: don't queue frames
+        // Dead-reckon the distance with road speed from the cluster. Maps' distance is
+        // along the road and its updates lag, so don't run the estimate all the way to
+        // 0 m on our own: hold at a small floor until Maps confirms we're at the turn.
         estDistM?.let { d ->
             val dt = (now - estAt).coerceIn(0, 2000) / 1000.0
-            estDistM = (d - g.speedKmh / 3.6 * dt).coerceAtLeast(0.0)
+            val floor = if ((lastMapsDist ?: 0) > 30) 20.0 else 0.0
+            estDistM = (d - g.speedKmh / 3.6 * dt).coerceAtLeast(minOf(floor, d))
         }
         estAt = now
         val dist = estDistM?.let { Math.round(it).toInt() } ?: 0

@@ -392,7 +392,15 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         refresh()
     }
 
+    private val lastRx = HashMap<Int, Pair<String, Long>>()
+
     override fun onFrame(frame: NtorqCodec.Frame, rawHex: String) {
+        // The cluster streams ~10 frames/s; log a frame type only when it changes
+        // (or every 5 s) so a long ride still fits in the exported log.
+        val now = System.currentTimeMillis()
+        val prev = lastRx[frame.id]
+        if (prev != null && prev.first == rawHex && now - prev.second < 5000) return
+        lastRx[frame.id] = rawHex to now
         FrameLog.add("RX", "5A%02X  %s".format(frame.id, rawHex))
     }
 

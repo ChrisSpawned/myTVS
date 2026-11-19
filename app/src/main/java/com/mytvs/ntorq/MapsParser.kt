@@ -144,6 +144,8 @@ object MapsParser {
 
     /** Parse the notification's text fields (in notification order: title first). */
     fun parse(fields: List<String>, nowMinOfDay: Int = nowMinOfDay()): NavInfo? {
+        // "Rerouting..." carries no turn — keep showing the previous one until Maps has a new route.
+        if (fields.any { it.trim().startsWith("Rerouting", ignoreCase = true) }) return null
         val clean = fields.map { it.trim() }.filter { it.isNotEmpty() && !JUNK.matches(it) }.distinct()
         if (clean.isEmpty()) return null
         if (clean.any { it.contains("starting navigation", ignoreCase = true) }) return null

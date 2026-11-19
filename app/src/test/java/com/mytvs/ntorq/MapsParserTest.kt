@@ -113,4 +113,8 @@ class MapsParserTest {
         val n = MapsParser.parse(listOf("Arriving", "at V B Mist", "•", "3:33 pm"), 15 * 60 + 33)!!
         assertEquals(Maneuver.ARRIVE, n.maneuver)
     }
+
+    @Test fun reroutingIsIgnored() {
+        assertNull(MapsParser.parse(listOf("Rerouting...", "Arrive ", "•", "Exit navigation"), 13 * 60 + 50))
+    }
 }

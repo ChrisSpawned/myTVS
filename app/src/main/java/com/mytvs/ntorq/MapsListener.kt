@@ -45,6 +45,7 @@ class MapsListener : NotificationListenerService() {
             lastDump = dump
             FrameLog.add("MAPS", "cat=${n.category} ongoing=${sbn.isOngoing}: $dump")
         }
+        if (texts.any { it.trim().startsWith("Rerouting", ignoreCase = true) }) NavBridge.onMapsRerouting()
         val info = MapsParser.parse(texts) ?: return
         if (info.distNextM == null && info.remainingMin == null && info.maneuver != Maneuver.ARRIVE) return
         navKey = sbn.key

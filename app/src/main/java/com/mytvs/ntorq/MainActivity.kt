@@ -26,6 +26,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.text.Editable
+import android.text.TextWatcher
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -74,6 +76,11 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private lateinit var rideTitle: TextView
     private lateinit var rideNote: TextView
     private var pickedPlace: Place? = null
+    private lateinit var keyCard: LinearLayout
+    private lateinit var keyBox: EditText
+    private var session = java.util.UUID.randomUUID().toString()
+    private var searchSeq = 0
+    private val searchRunnable = Runnable { runAutocomplete() }
     private var pendingStart: Pair<Place, Boolean>? = null
 
     private var gatt: NtorqGatt? = null
@@ -134,7 +141,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         i.action = null
         FrameLog.add("ROUTE", "shared: ${text.replace('\n', ' ')}")
         status("Finding the shared place…")
-        RouteNav.background({ RouteApi.resolveShared(text, RouteNav.lastPos) }) { r ->
+        RouteNav.background({ GoogleApi.resolveShared(text, RouteNav.lastPos) }) { r ->
             val p = r.getOrNull()
             if (p != null) { pick(p); status("Ready — choose how to ride there.") }
             else status("Couldn't read that place (${r.exceptionOrNull()?.message ?: "not found"}). Try searching.")
@@ -221,19 +228,28 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         whereCard.addView(label("Where to?"))
         val searchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         searchBox = EditText(this).apply {
-            hint = "Search a place"
+            hint = "Search Google Maps"
             setHintTextColor(muted)
             setTextColor(fg)
             textSize = 16f
             isSingleLine = true
             imeOptions = EditorInfo.IME_ACTION_SEARCH
             background = rounded(Color.parseColor("#1D2530"), 14)
-            setPadding(dp(14), dp(12), dp(14), dp(12))
-            setOnEditorActionListener { _, a, _ -> if (a == EditorInfo.IME_ACTION_SEARCH) { doSearch(); true } else false }
+            setPadding(dp(14), dp(13), dp(14), dp(13))
+            setOnEditorActionListener { _, a, _ ->
+                if (a == EditorInfo.IME_ACTION_SEARCH) { main.removeCallbacks(searchRunnable); runAutocomplete(); true } else false
+            }
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(e: Editable?) {
+                    main.removeCallbacks(searchRunnable)
+                    if ((e?.length ?: 0) >= 2) main.postDelayed(searchRunnable, 250)
+                    else { searchSeq++; results.removeAllViews(); if (pickedPlace == null) showRecents() }
+                }
+            })
         }
         searchRow.addView(searchBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        searchRow.addView(button("Search", accent, bg) { doSearch() }.apply { textSize = 14f; setPadding(dp(16), dp(12), dp(16), dp(12)) },
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
         whereCard.addView(searchRow, lp(10))
         results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         whereCard.addView(results, lp(6))
@@ -247,6 +263,31 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             .apply { textSize = 14f }, lp(8))
         whereCard.addView(picked)
         col.addView(whereCard, lp(20))
+
+        // Google Maps API key (one-time)
+        keyCard = cardBox().apply { background = rounded(Color.parseColor("#1F1A10"), 20, Color.parseColor("#4A3A17")) }
+        keyCard.addView(label("One-time setup").apply { setTextColor(amber) })
+        keyCard.addView(text(16f, fg, true, "Connect Google Maps search & routes"), lp(6))
+        keyCard.addView(text(13f, muted, false,
+            "1. Open console.cloud.google.com → create a project (billing must be on; personal use stays inside the free monthly allowance).\n" +
+                "2. APIs & Services → Library → enable \"Places API (New)\" and \"Routes API\".\n" +
+                "3. Credentials → Create credentials → API key. Restrict it to those two APIs.\n" +
+                "4. Paste the key here."), lp(4))
+        keyBox = EditText(this).apply {
+            hint = "AIza…"
+            setHintTextColor(muted); setTextColor(fg); textSize = 14f; isSingleLine = true
+            background = rounded(Color.parseColor("#1D2530"), 14)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+        }
+        keyCard.addView(keyBox, lp(12))
+        val keyBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        keyBtns.addView(button("Open Google Cloud", Color.parseColor("#1D2530"), fg) {
+            try { startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://console.cloud.google.com/google/maps-apis/credentials"))) } catch (_: Exception) {}
+        }.apply { textSize = 13f }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        keyBtns.addView(button("Save key", amber, bg) { saveKey() }.apply { textSize = 13f },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
+        keyCard.addView(keyBtns, lp(10))
+        col.addView(keyCard, lp(14))
 
         // Active ride
         rideCard = cardBox().apply { visibility = View.GONE }
@@ -331,7 +372,9 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
                     LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { if (i > 0) leftMargin = dp(8) })
             }
         }
-        devBox.addView(devRow("Export log" to ::onExportClicked), lp(8))
+        devBox.addView(devRow("Export log" to ::onExportClicked, "Google API key" to {
+            keyBox.setText(GoogleApi.apiKey); keyCard.visibility = View.VISIBLE
+        }), lp(8))
         col.addView(devBox)
 
         return ScrollView(this).apply {
@@ -404,6 +447,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         }
 
         // Where-to / ride cards
+        if (GoogleApi.apiKey.isBlank()) keyCard.visibility = View.VISIBLE
         val riding = RouteNav.active
         whereCard.visibility = if (riding) View.GONE else View.VISIBLE
         rideCard.visibility = if (riding) View.VISIBLE else View.GONE
@@ -414,7 +458,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
                 if (RouteNav.isTracking) "GPS locked" else "Waiting for GPS",
                 if (RouteNav.withGoogleMaps) "with Google Maps" else "cluster only",
             ).filter { it.isNotBlank() }.joinToString("  ·  ")
-        } else if (results.childCount == 0 && pickedPlace == null) {
+        } else if (results.childCount == 0 && pickedPlace == null && searchBox.text.isEmpty()) {
             showRecents()
         }
 
@@ -455,26 +499,65 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         rec.forEach { results.addView(placeRow(it, "↺")) }
     }
 
-    private fun doSearch() {
+    private fun suggestionRow(sg: Suggestion): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), dp(10), dp(4), dp(10))
+        isClickable = true
+        background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#22FFFFFF")), null, rounded(Color.WHITE, 12))
+        addView(text(18f, accent, true, "⌖").apply { minWidth = dp(32) })
+        val t = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        t.addView(text(15f, fg, true, sg.main).apply { maxLines = 1 })
+        if (sg.secondary.isNotBlank()) t.addView(text(12f, muted, false, sg.secondary).apply { maxLines = 1 })
+        addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        setOnClickListener { choose(sg) }
+    }
+
+    /** Google Places autocomplete as you type (debounced; stale replies dropped). */
+    private fun runAutocomplete() {
         val q = searchBox.text.toString().trim()
-        if (q.isEmpty()) return
-        hideKeyboard()
+        if (q.length < 2) return
+        if (GoogleApi.apiKey.isBlank()) { toast("Add your Google Maps API key first"); return }
         pickedPlace = null
         picked.visibility = View.GONE
-        results.removeAllViews()
-        results.addView(text(13f, muted, false, "Searching…").apply { setPadding(dp(4), dp(8), 0, dp(8)) })
-        RouteNav.background({ RouteApi.search(q, RouteNav.lastPos) }) { r ->
+        val seq = ++searchSeq
+        val sess = session
+        RouteNav.background({ GoogleApi.autocomplete(q, RouteNav.lastPos, sess) }) { r ->
+            if (seq != searchSeq) return@background
             results.removeAllViews()
             val list = r.getOrNull()
             when {
-                list == null -> results.addView(text(13f, amber, false, "Search failed — check mobile data (${r.exceptionOrNull()?.message})"))
-                list.isEmpty() -> results.addView(text(13f, muted, false, "No places found. Try adding the area, e.g. \"Lulu Mall Kochi\"."))
-                else -> {
-                    val here = RouteNav.lastPos
-                    val sorted = if (here != null) list.sortedBy { Geo.dist(here, it.pos) } else list
-                    sorted.forEach { results.addView(placeRow(it, "⌖")) }
-                }
+                list == null -> results.addView(text(13f, amber, false, "Google search failed: ${r.exceptionOrNull()?.message}")
+                    .apply { setPadding(dp(4), dp(8), 0, dp(8)) })
+                list.isEmpty() -> results.addView(text(13f, muted, false, "No places found").apply { setPadding(dp(4), dp(8), 0, dp(8)) })
+                else -> list.forEach { results.addView(suggestionRow(it)) }
             }
+        }
+    }
+
+    private fun choose(sg: Suggestion) {
+        hideKeyboard()
+        searchSeq++
+        results.removeAllViews()
+        results.addView(text(13f, muted, false, "Loading ${sg.main}…").apply { setPadding(dp(4), dp(8), 0, dp(8)) })
+        val sess = session
+        session = java.util.UUID.randomUUID().toString()   // a details call closes the session
+        RouteNav.background({ GoogleApi.details(sg, sess) }) { r ->
+            results.removeAllViews()
+            r.onSuccess { pick(it) }.onFailure { results.addView(text(13f, amber, false, "Couldn't load place: ${it.message}")) }
+        }
+    }
+
+    private fun saveKey() {
+        val k = keyBox.text.toString().trim()
+        if (k.length < 20) { toast("That doesn't look like an API key"); return }
+        RouteNav.saveApiKey(k)
+        hideKeyboard()
+        status("Checking the key…")
+        RouteNav.background({ GoogleApi.autocomplete("Kochi", RouteNav.lastPos, java.util.UUID.randomUUID().toString()) }) { r ->
+            if (r.isSuccess) { keyCard.visibility = View.GONE; status("Google Maps connected ✓") }
+            else status("Key saved, but Google said: ${r.exceptionOrNull()?.message}")
+            refresh()
         }
     }
 
@@ -504,6 +587,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         pickedPlace = null
         picked.visibility = View.GONE
         searchBox.setText("")
+        if (GoogleApi.apiKey.isBlank()) toast("No Google API key: using Google Maps' own distances")
         if (gatt == null) toast("Tip: connect to the scooter to see turns on the cluster")
         refresh()
     }

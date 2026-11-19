@@ -11,8 +11,8 @@ android {
         applicationId = "com.mytvs.ntorq"
         minSdk = 26
         targetSdk = 34
-        versionCode = 26
-        versionName = "0.21.1"
+        versionCode = 27
+        versionName = "0.22.0"
     }
 
     buildTypes {

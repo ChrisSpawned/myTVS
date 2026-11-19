@@ -42,18 +42,27 @@ object RouteNav {
     @Volatile var note = ""
         private set
 
-    private var lastFixAt = 0L
+    @Volatile var lastFixAt = 0L
+        private set
     private var offCount = 0
     private var lastRouteAt = 0L
     private var routing = false
     var onChange: (() -> Unit)? = null
 
-    fun init(ctx: Context) { if (!::app.isInitialized) app = ctx.applicationContext }
+    fun init(ctx: Context) {
+        if (!::app.isInitialized) app = ctx.applicationContext
+        GoogleApi.apiKey = app.getSharedPreferences("google", Context.MODE_PRIVATE).getString("key", "") ?: ""
+    }
+
+    fun saveApiKey(key: String) {
+        GoogleApi.apiKey = key.trim()
+        app.getSharedPreferences("google", Context.MODE_PRIVATE).edit().putString("key", key.trim()).apply()
+    }
 
     /** GPS fix younger than 5 s and on the route. */
     val isTracking: Boolean
         get() = active && tracker != null && System.currentTimeMillis() - lastFixAt < 5000 &&
-            (state?.offRouteM ?: 999.0) < 45
+            (state?.offRouteM ?: 999.0) < 40
 
     val lastPos: LatLng? get() = lastFix?.let { LatLng(it.latitude, it.longitude) } ?: lastKnown()
 
@@ -146,8 +155,8 @@ object RouteNav {
         val s = t.update(p)
         state = s
         // Off the route for a few fixes in a row → new route from here.
-        offCount = if (s.offRouteM > 45) offCount + 1 else 0
-        if (offCount >= 4 && System.currentTimeMillis() - lastRouteAt > 15000) {
+        offCount = if (s.offRouteM > 40) offCount + 1 else 0
+        if (offCount >= 3 && System.currentTimeMillis() - lastRouteAt > 10000) {
             note = "Off route — rerouting…"
             FrameLog.add("ROUTE", "off route by ${s.offRouteM.toInt()} m — rerouting")
             fetchRoute(p)
@@ -161,13 +170,23 @@ object RouteNav {
         changed()
     }
 
+    /** Fetch a fresh Google route from where we are (Maps rerouted, or our route disagrees). */
+    fun reroute(reason: String) {
+        if (!active || routing || System.currentTimeMillis() - lastRouteAt < 10000) return
+        val p = lastFix?.let { LatLng(it.latitude, it.longitude) } ?: return
+        note = "Rerouting…"
+        FrameLog.add("ROUTE", "reroute: $reason")
+        fetchRoute(p)
+    }
+
     private fun fetchRoute(from: LatLng) {
         val dest = destination ?: return
         if (routing) return
         routing = true
         lastRouteAt = System.currentTimeMillis()
         io.execute {
-            val r = runCatching { RouteApi.route(from, dest.pos) }
+            val heading = lastFix?.takeIf { it.hasBearing() && it.hasSpeed() && it.speed > 2f }?.bearing
+            val r = runCatching { GoogleApi.route(from, dest.pos, heading) }
             main.post {
                 routing = false
                 if (!active) return@post
@@ -179,7 +198,7 @@ object RouteNav {
                     lastFix?.let { f -> state = tracker?.update(LatLng(f.latitude, f.longitude)) }
                     NavBridge.onRouteChanged()
                 }.onFailure {
-                    note = "Couldn't get route (${it.message}) — using Google Maps' distances"
+                    note = "Couldn't get Google route (${it.message}) — using Maps' distances"
                     FrameLog.add("ROUTE", note)
                 }
                 changed()

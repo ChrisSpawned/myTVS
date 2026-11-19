@@ -47,14 +47,23 @@ class RideService : Service() {
         val n: Notification = (if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL)
         else @Suppress("DEPRECATION") Notification.Builder(this))
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
-            .setContentTitle("Connected to Ntorq")
-            .setContentText("Google Maps turns are sent to the cluster")
+            .setContentTitle(if (RouteNav.active) "Riding to ${RouteNav.destination?.name ?: "destination"}" else "Connected to Ntorq")
+            .setContentText("Turns are sent to the cluster")
             .setContentIntent(open)
             .setOngoing(true)
             .build()
         try {
             if (Build.VERSION.SDK_INT >= 29) {
-                startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                // Location type only when permission is granted (Android 14 rejects it otherwise).
+                val loc = checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                val bt = Build.VERSION.SDK_INT < 31 || checkSelfPermission(android.Manifest.permission.BLUETOOTH_CONNECT) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED
+                var type = 0
+                if (bt) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                if (loc) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                if (type == 0) { stopSelf(); return START_NOT_STICKY }
+                startForeground(ID, n, type)
             } else {
                 startForeground(ID, n)
             }

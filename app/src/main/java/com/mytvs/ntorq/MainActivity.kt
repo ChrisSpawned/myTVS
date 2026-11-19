@@ -24,6 +24,9 @@ import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -61,6 +64,17 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private lateinit var statusView: TextView
     private lateinit var devBox: LinearLayout
     private lateinit var devToggle: TextView
+    private lateinit var whereCard: LinearLayout
+    private lateinit var searchBox: EditText
+    private lateinit var results: LinearLayout
+    private lateinit var picked: LinearLayout
+    private lateinit var pickedName: TextView
+    private lateinit var pickedDetail: TextView
+    private lateinit var rideCard: LinearLayout
+    private lateinit var rideTitle: TextView
+    private lateinit var rideNote: TextView
+    private var pickedPlace: Place? = null
+    private var pendingStart: Pair<Place, Boolean>? = null
 
     private var gatt: NtorqGatt? = null
     private var scanning = false
@@ -72,6 +86,17 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
     private val permLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
             if (grants.values.all { it }) startScan() else toast("Bluetooth permission is needed to reach the scooter")
+        }
+    private val locPermLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
+            val p = pendingStart
+            pendingStart = null
+            if (grants[Manifest.permission.ACCESS_FINE_LOCATION] == true || grants[Manifest.permission.ACCESS_COARSE_LOCATION] == true) {
+                if (p != null) beginRide(p.first, p.second)
+            } else {
+                toast("Without location the cluster uses Google Maps' distances only")
+                if (p != null && p.second) RouteNav.launchGoogleMaps(p.first)
+            }
         }
     private val notifPermLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -89,10 +114,31 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             status("Connected — link kept alive in the background.")
         }
         NavBridge.statusListener = { refresh() }
+        RouteNav.onChange = { refresh() }
+        handleShare(intent)
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         refresh()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleShare(intent)
+    }
+
+    /** Google Maps → Share → this app. */
+    private fun handleShare(i: Intent?) {
+        if (i?.action != Intent.ACTION_SEND) return
+        val text = i.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        i.action = null
+        FrameLog.add("ROUTE", "shared: ${text.replace('\n', ' ')}")
+        status("Finding the shared place…")
+        RouteNav.background({ RouteApi.resolveShared(text, RouteNav.lastPos) }) { r ->
+            val p = r.getOrNull()
+            if (p != null) { pick(p); status("Ready — choose how to ride there.") }
+            else status("Couldn't read that place (${r.exceptionOrNull()?.message ?: "not found"}). Try searching.")
+        }
     }
 
     override fun onResume() {
@@ -169,6 +215,55 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         pill = text(13f, fg, true).apply { setPadding(dp(12), dp(6), dp(14), dp(6)) }
         header.addView(pill)
         col.addView(header)
+
+        // Where to?
+        whereCard = cardBox()
+        whereCard.addView(label("Where to?"))
+        val searchRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        searchBox = EditText(this).apply {
+            hint = "Search a place"
+            setHintTextColor(muted)
+            setTextColor(fg)
+            textSize = 16f
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            background = rounded(Color.parseColor("#1D2530"), 14)
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setOnEditorActionListener { _, a, _ -> if (a == EditorInfo.IME_ACTION_SEARCH) { doSearch(); true } else false }
+        }
+        searchRow.addView(searchBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        searchRow.addView(button("Search", accent, bg) { doSearch() }.apply { textSize = 14f; setPadding(dp(16), dp(12), dp(16), dp(12)) },
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { leftMargin = dp(8) })
+        whereCard.addView(searchRow, lp(10))
+        results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        whereCard.addView(results, lp(6))
+        picked = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
+        pickedName = text(18f, fg, true)
+        pickedDetail = text(13f, muted, false).apply { maxLines = 2 }
+        picked.addView(pickedName, lp(6))
+        picked.addView(pickedDetail, lp(2))
+        picked.addView(button("Navigate with Google Maps", accent, bg) { pickedPlace?.let { startRide(it, true) } }, lp(12))
+        picked.addView(button("Cluster only (no Maps)", Color.parseColor("#1D2530"), fg) { pickedPlace?.let { startRide(it, false) } }
+            .apply { textSize = 14f }, lp(8))
+        whereCard.addView(picked)
+        col.addView(whereCard, lp(20))
+
+        // Active ride
+        rideCard = cardBox().apply { visibility = View.GONE }
+        rideCard.addView(label("Riding to"))
+        rideTitle = text(20f, fg, true)
+        rideCard.addView(rideTitle, lp(4))
+        rideNote = text(13f, muted, false)
+        rideCard.addView(rideNote, lp(2))
+        val rideBtns = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        rideBtns.addView(button("Open Google Maps", Color.parseColor("#1D2530"), fg) {
+            RouteNav.destination?.let { RouteNav.launchGoogleMaps(it) }
+        }.apply { textSize = 14f }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        rideBtns.addView(button("End ride", Color.parseColor("#3A1E22"), Color.parseColor("#FF8A8A")) {
+            RouteNav.stop("ended by rider")
+        }.apply { textSize = 14f }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
+        rideCard.addView(rideBtns, lp(12))
+        col.addView(rideCard, lp(20))
 
         // Navigation
         val nav = cardBox()
@@ -289,6 +384,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         val n = NavBridge.current
         if (n != null && NavBridge.isActive) {
             navChip.visibility = View.VISIBLE
+            navChip.text = if (NavBridge.distSource == "GPS") "LIVE · GPS" else "LIVE ON CLUSTER"
             navArrow.text = arrowFor(n.maneuver)
             navArrow.setTextColor(accent)
             navDist.text = fmtDist(NavBridge.shownDistM ?: n.distNextM)
@@ -303,14 +399,113 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             navArrow.text = "➤"
             navArrow.setTextColor(muted)
             navDist.text = ""
-            navInstr.text = "Start navigation in Google Maps"
-            navMeta.text = "Turns appear here and on your cluster automatically."
+            navInstr.text = if (RouteNav.active) RouteNav.note.ifBlank { "Getting route…" } else "Pick a destination above"
+            navMeta.text = "Or start navigation in Google Maps — turns appear here and on your cluster automatically."
+        }
+
+        // Where-to / ride cards
+        val riding = RouteNav.active
+        whereCard.visibility = if (riding) View.GONE else View.VISIBLE
+        rideCard.visibility = if (riding) View.VISIBLE else View.GONE
+        if (riding) {
+            rideTitle.text = RouteNav.destination?.name ?: "Destination"
+            rideNote.text = listOf(
+                RouteNav.note,
+                if (RouteNav.isTracking) "GPS locked" else "Waiting for GPS",
+                if (RouteNav.withGoogleMaps) "with Google Maps" else "cluster only",
+            ).filter { it.isNotBlank() }.joinToString("  ·  ")
+        } else if (results.childCount == 0 && pickedPlace == null) {
+            showRecents()
         }
 
         // Setup card
         val granted = NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)
         accessCard.visibility = if (granted) View.GONE else View.VISIBLE
 
+    }
+
+    // ---------------------------------------------------------------- destination
+
+    private fun hideKeyboard() {
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(searchBox.windowToken, 0)
+    }
+
+    private fun placeRow(p: Place, icon: String): View = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(4), dp(10), dp(4), dp(10))
+        isClickable = true
+        background = RippleDrawable(ColorStateList.valueOf(Color.parseColor("#22FFFFFF")), null, rounded(Color.WHITE, 12))
+        addView(text(18f, accent, true, icon).apply { minWidth = dp(32) })
+        val t = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+        t.addView(text(15f, fg, true, p.name).apply { maxLines = 1 })
+        if (p.detail.isNotBlank()) t.addView(text(12f, muted, false, p.detail).apply { maxLines = 1 })
+        addView(t, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        RouteNav.lastPos?.let { here ->
+            addView(text(12f, muted, false, fmtDist(Geo.dist(here, p.pos).toInt())))
+        }
+        setOnClickListener { pick(p) }
+    }
+
+    private fun showRecents() {
+        results.removeAllViews()
+        val rec = RouteNav.recents()
+        if (rec.isEmpty()) return
+        results.addView(text(11f, muted, true, "RECENT").apply { letterSpacing = 0.15f; setPadding(dp(4), dp(8), 0, dp(2)) })
+        rec.forEach { results.addView(placeRow(it, "↺")) }
+    }
+
+    private fun doSearch() {
+        val q = searchBox.text.toString().trim()
+        if (q.isEmpty()) return
+        hideKeyboard()
+        pickedPlace = null
+        picked.visibility = View.GONE
+        results.removeAllViews()
+        results.addView(text(13f, muted, false, "Searching…").apply { setPadding(dp(4), dp(8), 0, dp(8)) })
+        RouteNav.background({ RouteApi.search(q, RouteNav.lastPos) }) { r ->
+            results.removeAllViews()
+            val list = r.getOrNull()
+            when {
+                list == null -> results.addView(text(13f, amber, false, "Search failed — check mobile data (${r.exceptionOrNull()?.message})"))
+                list.isEmpty() -> results.addView(text(13f, muted, false, "No places found. Try adding the area, e.g. \"Lulu Mall Kochi\"."))
+                else -> {
+                    val here = RouteNav.lastPos
+                    val sorted = if (here != null) list.sortedBy { Geo.dist(here, it.pos) } else list
+                    sorted.forEach { results.addView(placeRow(it, "⌖")) }
+                }
+            }
+        }
+    }
+
+    private fun pick(p: Place) {
+        pickedPlace = p
+        results.removeAllViews()
+        pickedName.text = p.name
+        pickedDetail.text = p.detail
+        picked.visibility = View.VISIBLE
+        refresh()
+    }
+
+    private fun startRide(p: Place, withMaps: Boolean) {
+        val need = listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+            .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (need.isNotEmpty()) {
+            pendingStart = p to withMaps
+            locPermLauncher.launch(need.toTypedArray())
+            return
+        }
+        beginRide(p, withMaps)
+    }
+
+    private fun beginRide(p: Place, withMaps: Boolean) {
+        RouteNav.start(p, withMaps)
+        RideService.start(this)   // keeps GPS + the scooter link alive behind Google Maps
+        pickedPlace = null
+        picked.visibility = View.GONE
+        searchBox.setText("")
+        if (gatt == null) toast("Tip: connect to the scooter to see turns on the cluster")
+        refresh()
     }
 
     // ---------------------------------------------------------------- connect
@@ -325,7 +520,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
             gatt?.disconnect()
             gatt = null
             NavBridge.gatt = null
-            RideService.stop(this)
+            if (!RouteNav.active) RideService.stop(this)
             status("Disconnected.")
             refresh()
             return
@@ -421,6 +616,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         // cluster; just detach this screen. Use Disconnect to end the session.
         gatt?.listener = null
         NavBridge.statusListener = null
+        RouteNav.onChange = null
         super.onDestroy()
     }
 }

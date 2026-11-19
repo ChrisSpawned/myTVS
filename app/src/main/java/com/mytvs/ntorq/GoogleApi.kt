@@ -32,11 +32,17 @@ object GoogleApi {
             }
             val code = c.responseCode
             val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.readText() ?: ""
+            val what = URL(url).path.substringAfterLast('/').substringBefore('?').take(40)
             if (code !in 200..299) {
                 val msg = runCatching { JSONObject(text).getJSONObject("error").getString("message") }.getOrNull()
+                FrameLog.add("GOOGLE", "$what → HTTP $code: ${msg ?: text.take(300)}")
                 throw java.io.IOException(msg ?: "HTTP $code")
             }
+            FrameLog.add("GOOGLE", "$what → OK (${text.length} bytes)")
             return text
+        } catch (e: java.io.IOException) {
+            if (e.message?.startsWith("HTTP") != true) FrameLog.add("GOOGLE", "network error: ${e.javaClass.simpleName}: ${e.message}")
+            throw e
         } finally { c.disconnect() }
     }
 

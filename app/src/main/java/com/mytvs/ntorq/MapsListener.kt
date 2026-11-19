@@ -27,6 +27,7 @@ class MapsListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         NavBridge.init(applicationContext)
+        RouteNav.init(applicationContext)
         FrameLog.add("MAPS", "notification access active")
         try {
             activeNotifications?.forEach { onNotificationPosted(it) }

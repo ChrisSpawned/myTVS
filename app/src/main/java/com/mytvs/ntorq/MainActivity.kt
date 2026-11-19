@@ -522,10 +522,13 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         picked.visibility = View.GONE
         val seq = ++searchSeq
         val sess = session
+        FrameLog.add("SEARCH", "\"$q\"")
         RouteNav.background({ GoogleApi.autocomplete(q, RouteNav.lastPos, sess) }) { r ->
             if (seq != searchSeq) return@background
             results.removeAllViews()
             val list = r.getOrNull()
+            FrameLog.add("SEARCH", list?.let { "${it.size} suggestions: " + it.take(5).joinToString(" / ") { s -> s.main } }
+                ?: "failed: ${r.exceptionOrNull()?.message}")
             when {
                 list == null -> results.addView(text(13f, amber, false, "Google search failed: ${r.exceptionOrNull()?.message}")
                     .apply { setPadding(dp(4), dp(8), 0, dp(8)) })
@@ -544,6 +547,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         session = java.util.UUID.randomUUID().toString()   // a details call closes the session
         RouteNav.background({ GoogleApi.details(sg, sess) }) { r ->
             results.removeAllViews()
+            FrameLog.add("SEARCH", "picked ${sg.main}: " + (r.getOrNull()?.pos?.let { "%.5f,%.5f".format(it.lat, it.lng) } ?: "failed ${r.exceptionOrNull()?.message}"))
             r.onSuccess { pick(it) }.onFailure { results.addView(text(13f, amber, false, "Couldn't load place: ${it.message}")) }
         }
     }
@@ -555,6 +559,7 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         hideKeyboard()
         status("Checking the key…")
         RouteNav.background({ GoogleApi.autocomplete("Kochi", RouteNav.lastPos, java.util.UUID.randomUUID().toString()) }) { r ->
+            FrameLog.add("GOOGLE", "key check: " + if (r.isSuccess) "OK" else "failed ${r.exceptionOrNull()?.message}")
             if (r.isSuccess) { keyCard.visibility = View.GONE; status("Google Maps connected ✓") }
             else status("Key saved, but Google said: ${r.exceptionOrNull()?.message}")
             refresh()

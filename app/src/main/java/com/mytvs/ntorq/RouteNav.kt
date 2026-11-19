@@ -51,11 +51,13 @@ object RouteNav {
 
     fun init(ctx: Context) {
         if (!::app.isInitialized) app = ctx.applicationContext
+        FrameLog.init(app)
         GoogleApi.apiKey = app.getSharedPreferences("google", Context.MODE_PRIVATE).getString("key", "") ?: ""
     }
 
     fun saveApiKey(key: String) {
         GoogleApi.apiKey = key.trim()
+        FrameLog.add("GOOGLE", "API key saved (${key.trim().take(6)}…, ${key.trim().length} chars)")
         app.getSharedPreferences("google", Context.MODE_PRIVATE).edit().putString("key", key.trim()).apply()
     }
 
@@ -186,6 +188,7 @@ object RouteNav {
         lastRouteAt = System.currentTimeMillis()
         io.execute {
             val heading = lastFix?.takeIf { it.hasBearing() && it.hasSpeed() && it.speed > 2f }?.bearing
+            FrameLog.add("ROUTE", "Google route request from %.5f,%.5f".format(from.lat, from.lng))
             val r = runCatching { GoogleApi.route(from, dest.pos, heading) }
             main.post {
                 routing = false

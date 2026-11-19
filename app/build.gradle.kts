@@ -11,8 +11,19 @@ android {
         applicationId = "com.mytvs.ntorq"
         minSdk = 26
         targetSdk = 34
-        versionCode = 28
-        versionName = "0.22.1"
+        versionCode = 29
+        versionName = "0.22.2"
+    }
+
+    // Fixed debug key (committed on purpose — it only signs this personal app) so every CI
+    // build installs over the previous one and the Google API key's Android restriction matches.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("ntorq-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {

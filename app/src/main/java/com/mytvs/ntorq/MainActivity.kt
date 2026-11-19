@@ -269,10 +269,14 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         keyCard.addView(label("One-time setup").apply { setTextColor(amber) })
         keyCard.addView(text(16f, fg, true, "Connect Google Maps search & routes"), lp(6))
         keyCard.addView(text(13f, muted, false,
-            "1. Open console.cloud.google.com → create a project (billing must be on; personal use stays inside the free monthly allowance).\n" +
-                "2. APIs & Services → Library → enable \"Places API (New)\" and \"Routes API\".\n" +
-                "3. Credentials → Create credentials → API key. Restrict it to those two APIs.\n" +
-                "4. Paste the key here."), lp(4))
+            "1. console.cloud.google.com → create a project and link a billing account (personal use stays inside the free monthly allowance).\n" +
+                "2. APIs & Services → Library → enable \"Places API (New)\" (not the old \"Places API\") and \"Routes API\".\n" +
+                "3. Credentials → Create credentials → API key. Under API restrictions allow those two APIs. " +
+                "Application restriction: None, or Android apps with the package and SHA-1 below.\n" +
+                "4. Paste the key here. A new key can take ~5 minutes to start working."), lp(4))
+        keyCard.addView(text(12f, accent, false, "Package: $packageName\nSHA-1: ${RouteNav.certSha1(this, colons = true)}").apply {
+            setTextIsSelectable(true)
+        }, lp(8))
         keyBox = EditText(this).apply {
             hint = "AIza…"
             setHintTextColor(muted); setTextColor(fg); textSize = 14f; isSingleLine = true
@@ -561,7 +565,11 @@ class MainActivity : AppCompatActivity(), NtorqGatt.Listener {
         RouteNav.background({ GoogleApi.autocomplete("Kochi", RouteNav.lastPos, java.util.UUID.randomUUID().toString()) }) { r ->
             FrameLog.add("GOOGLE", "key check: " + if (r.isSuccess) "OK" else "failed ${r.exceptionOrNull()?.message}")
             if (r.isSuccess) { keyCard.visibility = View.GONE; status("Google Maps connected ✓") }
-            else status("Key saved, but Google said: ${r.exceptionOrNull()?.message}")
+            else {
+                val msg = r.exceptionOrNull()?.message ?: "unknown error"
+                status("Google rejected the key: $msg")
+                Toast.makeText(this, "Google: $msg", Toast.LENGTH_LONG).show()
+            }
             refresh()
         }
     }

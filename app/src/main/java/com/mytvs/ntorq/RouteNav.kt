@@ -53,7 +53,23 @@ object RouteNav {
         if (!::app.isInitialized) app = ctx.applicationContext
         FrameLog.init(app)
         GoogleApi.apiKey = app.getSharedPreferences("google", Context.MODE_PRIVATE).getString("key", "") ?: ""
+        GoogleApi.androidPackage = app.packageName
+        GoogleApi.androidCertSha1 = certSha1(app)
     }
+
+    /** SHA-1 of the app's signing certificate, uppercase hex without colons. */
+    @Suppress("DEPRECATION")
+    fun certSha1(ctx: Context, colons: Boolean = false): String = try {
+        val pm = ctx.packageManager
+        val sig = if (android.os.Build.VERSION.SDK_INT >= 28) {
+            pm.getPackageInfo(ctx.packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+                .signingInfo?.apkContentsSigners?.firstOrNull()
+        } else {
+            pm.getPackageInfo(ctx.packageName, android.content.pm.PackageManager.GET_SIGNATURES).signatures?.firstOrNull()
+        }
+        val d = java.security.MessageDigest.getInstance("SHA-1").digest(sig!!.toByteArray())
+        d.joinToString(if (colons) ":" else "") { "%02X".format(it) }
+    } catch (_: Exception) { "" }
 
     fun saveApiKey(key: String) {
         GoogleApi.apiKey = key.trim()

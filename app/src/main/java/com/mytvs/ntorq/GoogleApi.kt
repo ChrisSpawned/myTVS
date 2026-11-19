@@ -16,12 +16,19 @@ data class Suggestion(val placeId: String, val main: String, val secondary: Stri
  */
 object GoogleApi {
     @Volatile var apiKey: String = ""
+    /** Sent so a key restricted to "Android apps" accepts our calls. */
+    @Volatile var androidPackage: String = ""
+    @Volatile var androidCertSha1: String = ""
 
     private fun call(method: String, url: String, body: String?, fieldMask: String?): String {
         if (apiKey.isBlank()) throw IllegalStateException("Google Maps API key not set")
         val c = URL(url).openConnection() as HttpURLConnection
         c.requestMethod = method
         c.setRequestProperty("X-Goog-Api-Key", apiKey)
+        if (androidPackage.isNotEmpty() && androidCertSha1.isNotEmpty()) {
+            c.setRequestProperty("X-Android-Package", androidPackage)
+            c.setRequestProperty("X-Android-Cert", androidCertSha1)
+        }
         if (fieldMask != null) c.setRequestProperty("X-Goog-FieldMask", fieldMask)
         c.connectTimeout = 10000; c.readTimeout = 10000
         try {

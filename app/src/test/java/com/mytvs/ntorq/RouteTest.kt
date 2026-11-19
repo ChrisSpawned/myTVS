@@ -60,12 +60,12 @@ class RouteTest {
 
         val t = RouteTracker(r)
         val s1 = t.update(LatLng(9.9745, 76.28001))   // halfway up the first leg
-        assertEquals(500, s1.distToNextM.toDouble().toInt(), 15)
+        assertEquals(500.0, s1.distToNextM.toDouble(), 15.0)
         assertTrue(s1.offRouteM < 5)
         assertEquals(Maneuver.RIGHT, s1.next!!.maneuver)
         val s2 = t.update(LatLng(9.9790, 76.2823))    // after the turn
         assertEquals(Maneuver.ARRIVE, s2.next!!.maneuver)
-        assertEquals(250, s2.distToNextM.toDouble().toInt(), 15)
+        assertEquals(250.0, s2.distToNextM.toDouble(), 15.0)
         val off = t.update(LatLng(9.9790, 76.2900))   // 600 m off the end
         assertTrue(off.offRouteM > 300)
     }

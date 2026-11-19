@@ -144,11 +144,12 @@ object NavBridge {
             dist = estDistM?.let { Math.round(it).toInt() }
             distSource = "Maps"
             if (tracking) {
+                val tt = t!!
                 // Keep the matched step while it's still ahead; otherwise look for it.
-                val step = lockedStep?.takeIf { t!!.distTo(it) != null }
-                    ?: RouteTracker.match(t!!, m.maneuver, dist).also { lockedStep = it }
+                val step = lockedStep?.takeIf { tt.distTo(it) != null }
+                    ?: RouteTracker.match(tt, m.maneuver, dist).also { lockedStep = it }
                 if (step != null) {
-                    dist = t.distTo(step)
+                    dist = tt.distTo(step)
                     distSource = "GPS"
                 }
             }

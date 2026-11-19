@@ -72,8 +72,8 @@ class RouteTest {
 
     @Test fun matchesGoogleTurnToOurRoute() {
         val t = RouteTracker(RouteApi.parseOsrm(osrmJson()))
-        t.update(LatLng(9.9745, 76.28))
-        assertNotNull(RouteTracker.match(t, Maneuver.RIGHT, 480))     // close to 500 m
+        t.update(LatLng(9.9752, 76.28))                               // ~420 m before the turn
+        assertNotNull(RouteTracker.match(t, Maneuver.RIGHT, 400))     // close to Google's distance
         assertNotNull(RouteTracker.match(t, Maneuver.RIGHT, null))    // Maps gave no distance
         assertNull(RouteTracker.match(t, Maneuver.LEFT, 500))         // wrong direction
         assertNull(RouteTracker.match(t, Maneuver.RIGHT, 1400))       // too far off

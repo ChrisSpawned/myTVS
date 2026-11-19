@@ -78,8 +78,13 @@ object RouteNav {
     }
 
     /** GPS fix younger than 5 s and on the route. */
+    /**
+     * On our route with a recent fix. Short GPS gaps (up to 30 s) are bridged by
+     * NavBridge moving along the route at the scooter's own speed, instead of
+     * falling back to Google Maps' slow notification.
+     */
     val isTracking: Boolean
-        get() = active && tracker != null && System.currentTimeMillis() - lastFixAt < 5000 &&
+        get() = active && tracker != null && System.currentTimeMillis() - lastFixAt < 30000 &&
             (state?.offRouteM ?: 999.0) < 40
 
     val lastPos: LatLng? get() = lastFix?.let { LatLng(it.latitude, it.longitude) } ?: lastKnown()
@@ -132,23 +137,54 @@ object RouteNav {
         override fun onProviderDisabled(p: String) { note = "Turn on location (GPS)" ; changed() }
     }
 
+    private var fused: com.google.android.gms.location.FusedLocationProviderClient? = null
+    private val fusedCb = object : com.google.android.gms.location.LocationCallback() {
+        override fun onLocationResult(r: com.google.android.gms.location.LocationResult) {
+            r.lastLocation?.let { onFix(it) }
+        }
+    }
+
+    /** Same location engine Google Maps uses (GPS + sensors), 1 fix per second; raw GPS as fallback. */
     @SuppressLint("MissingPermission")
     private fun startGps() {
+        fixCount = 0; statsAt = System.currentTimeMillis()
+        try {
+            val ok = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+                .isGooglePlayServicesAvailable(app) == com.google.android.gms.common.ConnectionResult.SUCCESS
+            if (ok) {
+                val req = com.google.android.gms.location.LocationRequest.Builder(
+                    com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, 1000L)
+                    .setMinUpdateIntervalMillis(500L)
+                    .setWaitForAccurateLocation(false)
+                    .build()
+                fused = com.google.android.gms.location.LocationServices.getFusedLocationProviderClient(app).also {
+                    it.requestLocationUpdates(req, fusedCb, Looper.getMainLooper())
+                }
+                FrameLog.add("ROUTE", "location: fused provider, 1 Hz high accuracy")
+                return
+            }
+        } catch (e: Exception) {
+            FrameLog.add("ROUTE", "fused location unavailable: ${e.message}")
+        }
         val lm = app.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         try {
             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, gps, Looper.getMainLooper())
+            FrameLog.add("ROUTE", "location: raw GPS provider")
         } catch (e: Exception) {
             note = "Location permission needed"
             FrameLog.add("ROUTE", "GPS not started: ${e.message}")
         }
-        try {
-            lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 0f, gps, Looper.getMainLooper())
-        } catch (_: Exception) { }
     }
 
     private fun stopGps() {
+        try { fused?.removeLocationUpdates(fusedCb) } catch (_: Exception) { }
+        fused = null
         try { (app.getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(gps) } catch (_: Exception) { }
     }
+
+    private var fixCount = 0
+    private var accSum = 0.0
+    private var statsAt = 0L
 
     @SuppressLint("MissingPermission")
     fun lastKnown(): LatLng? = try {
@@ -159,9 +195,15 @@ object RouteNav {
     } catch (_: Exception) { null }
 
     private fun onFix(l: Location) {
-        // Ignore coarse network fixes once GPS is delivering.
-        if (l.provider == LocationManager.NETWORK_PROVIDER && System.currentTimeMillis() - lastFixAt < 4000) return
-        if (l.hasAccuracy() && l.accuracy > 60) return
+        val nowMs = System.currentTimeMillis()
+        if (nowMs - statsAt >= 15000) {
+            FrameLog.add("GPS", "%d fixes/15 s · avg ±%.0f m · off route %s".format(
+                fixCount, if (fixCount > 0) accSum / fixCount else 0.0,
+                state?.offRouteM?.let { "%.0f m".format(it) } ?: "-"))
+            fixCount = 0; accSum = 0.0; statsAt = nowMs
+        }
+        if (l.hasAccuracy() && l.accuracy > 50) return
+        fixCount++; accSum += if (l.hasAccuracy()) l.accuracy.toDouble() else 0.0
         lastFix = l
         lastFixAt = System.currentTimeMillis()
         val p = LatLng(l.latitude, l.longitude)

@@ -168,7 +168,8 @@ object NavBridge {
             // Our Google route: GPS distance, advanced with speed between 1 Hz fixes,
             // never counting back up within a step (except a real GPS correction).
             val st = s.next
-            val age = (now - RouteNav.lastFixAt).coerceIn(0, 2000) / 1000.0
+            // Between fixes (and through GPS gaps up to 30 s) move along the route at road speed.
+            val age = (now - RouteNav.lastFixAt).coerceIn(0, 30000) / 1000.0
             var d = (s.distToNextM - speed / 3.6 * age).coerceAtLeast(0.0).toInt()
             val prev = shownDistM
             if (s.nextIndex == shownStep && prev != null && d > prev && d < prev + 25) d = prev

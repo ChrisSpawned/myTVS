@@ -11,8 +11,8 @@ android {
         applicationId = "com.mytvs.ntorq"
         minSdk = 26
         targetSdk = 34
-        versionCode = 29
-        versionName = "0.22.2"
+        versionCode = 30
+        versionName = "0.23.0"
     }
 
     // Fixed debug key (committed on purpose — it only signs this personal app) so every CI
@@ -46,6 +46,7 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.9.1")
     implementation("com.google.android.material:material:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("com.google.android.gms:play-services-location:21.3.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }
